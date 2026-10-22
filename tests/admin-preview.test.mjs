@@ -370,7 +370,7 @@ test('manual switch works without a price; edits are audited, versioned and idem
   assert.equal((await json('/api/admin/products/'+id+'/availability',{data:input,key})).status,200);
   // Unpriced varieties do not leak back to the public catalog when their availability is toggled.
   assert.equal((await json('/api/products',{auth:null})).data.products.find(p=>p.id===id),undefined);
-  let p=await adminProduct(id);assert.equal(p.inStock,true);assert.equal(p.available,false);assert.equal(p.price_kop,null);assert.equal(p.stock,20);
+  let p=await adminProduct(id);assert.equal(p.inStock,true);assert.equal(p.confirmed_price_kop,null);assert.equal(p.price_kop,null);assert.equal(p.stock,20);
   assert.equal((await json('/api/cart/quote',{data:{items:[{productId:id,quantity:1}]}})).status,409);
   const {parseCsv}=await import('../server/catalog.js');const csv=await exported(),row=parseCsv(csv).find(p=>p.product_id===id);assert.equal(row.available,'1');assert.equal(row.price_uah,'');assert.ok(!Object.hasOwn(row,'stock'));
   assert.equal((await json('/api/admin/catalog/preview',{data:{csv}})).status,200);
