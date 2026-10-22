@@ -1,0 +1,52 @@
+.demo-order-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, .8fr);
+  align-items: start;
+  gap: 22px 32px;
+  min-height: 0;
+  margin-bottom: 20px;
+  border-color: #bacbb2;
+  background: linear-gradient(120deg, var(--paper), #edf2e7);
+}
+
+.demo-order-card:hover { transform: none; }
+.demo-order-card .title { margin: 12px 0; }
+.demo-order-card .desc { max-width: 52ch; margin-bottom: 0; }
+.demo-order-card .demo-order-price { margin: 14px 0 8px; font-size: 24px; }
+.demo-order-price small { font-size: 14px; font-weight: 500; color: var(--muted); }
+.demo-order-form { min-width: 0; }
+.demo-order-fields { display: grid; gap: 12px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.demo-order-fields label { font-size: 14px; font-weight: 650; }
+.demo-order-fields select {
+  width: 100%;
+  min-height: 48px;
+  padding: 10px 12px;
+  border: 1px solid #bec9b8;
+  border-radius: 10px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+}
+.demo-order-total { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; align-items: baseline; }
+.demo-order-total output { color: var(--green); font-size: 23px; font-weight: 750; white-space: nowrap; }
+.demo-order-card button { width: 100%; min-height: 48px; padding: 12px 16px; touch-action: manipulation; }
+.demo-order-card button:disabled { cursor: wait; opacity: .65; }
+.demo-order-card :is(button, select):focus-visible { outline: 3px solid var(--leaf); outline-offset: 3px; }
+.demo-order-note { margin: 10px 0 0; font-size: 12px; color: var(--muted); }
+.demo-order-feedback { grid-column: 1 / -1; margin: 0; font-size: 14px; overflow-wrap: anywhere; }
+.demo-order-feedback:empty { display: none; }
+.demo-order-feedback[data-tone="error"] { color: #a52d28; }
+.demo-order-success { grid-column: 1 / -1; min-width: 0; padding-top: 18px; border-top: 1px solid #bacbb2; }
+.demo-order-success h4 { margin: 0 0 12px; font-size: 19px; color: var(--green); }
+.demo-order-success dl { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin: 0 0 18px; }
+.demo-order-success dl > div { min-width: 0; }
+.demo-order-success dt { color: var(--muted); font-size: 12px; }
+.demo-order-success dd { margin: 4px 0 0; font-weight: 650; overflow-wrap: anywhere; }
+.demo-order-success .demo-order-number { font: 13px/1.6 ui-monospace, monospace; }
+.demo-order-card [hidden] { display: none !important; }
+.demo-order-noscript { grid-column: 1 / -1; margin: 0; }
+
+@media (max-width: 650px) {
+  .demo-order-card { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  .demo-order-success dl { grid-template-columns: 1fr; gap: 12px; }
+}
