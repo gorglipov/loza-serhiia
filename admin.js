@@ -87,7 +87,7 @@
   }
   function importCatalog(){
     openEditor('Імпорт каталогу');const form=el('form'),file=field(form,'CSV-файл','',{type:'file'});file.accept='.csv,text/csv';file.required=true;
-    const message=el('p','Порожня ціна залишає «Ціну уточнюйте». Для продажу потрібні price_confirmed=1, available=1 і stock>0. Імпорт не змінює початкове джерело PDF.','hint'),preview=el('div'),status=el('p');status.setAttribute('role','status');
+    const message=el('p','Порожня ціна залишає «Немає в наявності». Для продажу потрібні price_confirmed=1, available=1 і stock>0. Імпорт не змінює початкове джерело PDF.','hint'),preview=el('div'),status=el('p');status.setAttribute('role','status');
     const check=el('button','Перевірити файл','primary');check.type='submit';let source='',result=null,key=null;
     const apply=button('Застосувати імпорт',()=>saving(async()=>{if(!result)return;const data=await api('catalog/import',{csv:source,previewHash:result.previewHash},key);dialog.close();await load();return `Імпортовано ${data.count} товарів. Зміни записано в історію.`;}),true);apply.hidden=true;
     file.addEventListener('change',()=>{result=null;source='';key=null;apply.hidden=true;preview.replaceChildren();status.textContent='';});

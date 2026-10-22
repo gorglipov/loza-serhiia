@@ -2,7 +2,7 @@
   "use strict";
   const $ = selector => document.querySelector(selector);
   const money = new Intl.NumberFormat("uk-UA", { style: "currency", currency: "UAH" });
-  const price = kop => Number.isSafeInteger(kop) ? money.format(kop / 100) : "Ціну уточнюйте";
+  const price = kop => Number.isSafeInteger(kop) ? money.format(kop / 100) : "Немає в наявності";
   const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
   const CART_KEY = "loza-cart-v2", PENDING_KEY = "loza-checkout-pending-v2";
   const timeoutSignal = milliseconds => {
@@ -120,7 +120,7 @@
         ${product.priceKop !== null && !product.priceConfirmed ? '<p class="catalog-price-note">Ціна з PDF · очікує підтвердження</p>' : ""}
         <p class="store-stock${available ? "" : " store-unavailable"}">${available ? `У наявності: ${product.stock} шт.` : "Немає в наявності"}</p>
         ${quantity ? `<div class="quantity-control"><button type="button" data-action="decrease" data-id="${esc(product.id)}" aria-label="Зменшити кількість ${esc(product.name)}" ${pending ? "disabled" : ""}>−</button><span><strong>${quantity}</strong><small>у кошику</small></span><button type="button" data-action="increase" data-id="${esc(product.id)}" aria-label="Збільшити кількість ${esc(product.name)}" ${pending || !available || quantity >= Math.min(5, product.stock) ? "disabled" : ""}>+</button></div>` :
-          `<button class="add" type="button" data-action="increase" data-id="${esc(product.id)}" ${pending || !available ? "disabled" : ""}>${available ? "Додати до кошика" : product.priceKop === null ? "Ціну уточнюйте" : !product.priceConfirmed ? "Ціна очікує підтвердження" : "Немає в наявності"}</button>`}
+          `<button class="add" type="button" data-action="increase" data-id="${esc(product.id)}" ${pending || !available ? "disabled" : ""}>${available ? "Додати до кошика" : product.priceKop === null ? "Немає в наявності" : !product.priceConfirmed ? "Ціна очікує підтвердження" : "Немає в наявності"}</button>`}
       </article>`;
     }).join("") : '<p class="store-load">За цими умовами товарів не знайдено.</p>';
     $("#varietySuggestions").innerHTML = query ? products.filter(product => product.name.toLocaleLowerCase("uk").startsWith(query)).slice(0, 10).map(product => `<option value="${esc(product.name)}"></option>`).join("") : "";

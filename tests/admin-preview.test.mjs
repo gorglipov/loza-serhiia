@@ -308,7 +308,7 @@ test('catalog cards, search, all filters and cart work without photos on desktop
     const page=await browser.newPage({viewport:{width,height:900},reducedMotion:'reduce'}),errors=[];page.on('pageerror',error=>errors.push(error.message));
     await page.goto((await mf.ready).origin+'/');await page.waitForFunction(()=>document.querySelectorAll('#grid article').length===107);
     assert.equal(await page.locator('#grid img,#grid picture,#grid canvas').count(),0);assert.equal(await page.locator('.kishmish-badge').count(),28);
-    assert.ok(await page.getByText('Ціну уточнюйте',{exact:true}).count()>0);
+    assert.ok(await page.getByText('Немає в наявності',{exact:true}).count()>0);
     await page.locator('#search').fill('Алвіка');assert.equal(await page.locator('#grid article').count(),1);await page.locator('#resetFilters').click();
     await page.locator('#kishmish').selectOption('1');assert.equal(await page.locator('#grid article').count(),28);await page.locator('#resetFilters').click();
     await page.locator('#ripening').selectOption('ранньо-середній');assert.equal(await page.locator('#grid article').count(),13);await page.locator('#resetFilters').click();
