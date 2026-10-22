@@ -2,7 +2,6 @@ const encoder = new TextEncoder();
 export const MAX_QUANTITY = 5;
 export const DELIVERY_METHODS = [
   { id: "nova_poshta", name: "Нова пошта" },
-  { id: "ukrposhta", name: "Укрпошта" },
 ];
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
