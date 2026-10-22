@@ -186,7 +186,7 @@ test('order commit queues one message; concurrent replay never creates duplicate
   await Promise.all([json('/api/orders/create',{data:checkout,key}),json('/api/orders/create',{data:checkout,key})]);await settle();
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM order_checkout').first()).n,1);
   const savedPayment=await db.prepare('SELECT comment FROM order_checkout WHERE order_id=?').bind(orderId).first();
-  assert.match(savedPayment.comment,/^\\[LOZA_PAYMENT:deposit_cod\\] /);
+  assert.match(savedPayment.comment,/^\[LOZA_PAYMENT:deposit_cod\] /);
   assert.ok(savedPayment.comment.endsWith('Private comment'));
   assert.equal((await db.prepare("SELECT COUNT(*) n FROM telegram_outbox WHERE order_id=?").bind(orderId).first()).n,1);
   const event=await db.prepare('SELECT state,message_id FROM telegram_outbox WHERE order_id=?').bind(orderId).first();assert.equal(event.state,'sent');
