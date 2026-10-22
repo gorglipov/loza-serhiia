@@ -10,16 +10,40 @@ const decode = value => {
   return Uint8Array.from(raw, c => c.charCodeAt(0));
 };
 const encode = value => btoa(String.fromCharCode(...new Uint8Array(value))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+// Accept the team hostname copied from Zero Trust as well as its HTTPS issuer URL.
+// Only this exact Cloudflare hostname is allowed; no arbitrary issuer/JWKS URLs.
+function teamDomain(value) {
+  if (typeof value !== 'string') return null;
+  const input=value.trim();
+  const match=input.match(/^(?:https:\/\/)?([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cloudflareaccess\.com)\/?$/i);
+  return match ? 'https://'+match[1].toLowerCase() : null;
+}
+const configuredText=value=>typeof value==='string' ? value.trim() : '';
+function administratorEmails(value) {
+  return configuredText(value).split(',').map(x=>x.trim().toLowerCase()).filter(Boolean);
+}
+// Safe runtime diagnostics: fixed field names and booleans, never values/lengths.
+export function adminConfiguration(env) {
+  const emails=administratorEmails(env.ADMIN_EMAILS);
+  const validity={
+    ACCESS_TEAM_DOMAIN:teamDomain(env.ACCESS_TEAM_DOMAIN)!==null,
+    ACCESS_AUD:/^[a-f0-9]{64}$/i.test(configuredText(env.ACCESS_AUD)),
+    ADMIN_EMAILS:emails.length>0 && emails.every(x=>/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(x)),
+    ADMIN_CSRF_SECRET:typeof env.ADMIN_CSRF_SECRET==='string' && env.ADMIN_CSRF_SECRET.trim().length>=32,
+  };
+  return Object.fromEntries(Object.entries(validity).map(([name,formatValid])=>[name,{
+    present:env[name]!==undefined && env[name]!==null && env[name]!=='',formatValid,
+  }]));
+}
 function settings(env) {
-  const domain = env.ACCESS_TEAM_DOMAIN;
-  const aud = env.ACCESS_AUD;
-  const emails = (env.ADMIN_EMAILS || '').split(',').map(x=>x.trim().toLowerCase()).filter(Boolean);
-  if (!/^https:\/\/[a-z0-9][a-z0-9-]*\.cloudflareaccess\.com$/.test(domain || '') ||
-    !/^[a-f0-9]{64}$/i.test(aud || '') || !emails.length || !emails.every(x=>/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(x)) ||
-    typeof env.ADMIN_CSRF_SECRET !== 'string' || env.ADMIN_CSRF_SECRET.length < 32) {
-    throw new StoreError('ADMIN_NOT_CONFIGURED', 'Адмінпанель ще не налаштована. Перевірте Cloudflare Access.', 503);
+  const configuration=adminConfiguration(env);
+  const invalidFields=Object.keys(configuration).filter(name=>!configuration[name].formatValid);
+  if (invalidFields.length) {
+    const error=new StoreError('ADMIN_NOT_CONFIGURED','Перевірте налаштування Preview: '+invalidFields.join(', ')+'.',503);
+    error.configuration=configuration;
+    throw error;
   }
-  return {domain,aud,emails};
+  return {domain:teamDomain(env.ACCESS_TEAM_DOMAIN),aud:configuredText(env.ACCESS_AUD),emails:administratorEmails(env.ADMIN_EMAILS)};
 }
 async function signingKey(domain,kid) {
   let entry = cache.get(domain);
@@ -93,6 +117,8 @@ export async function protectAdmin(context) {
     const response=await context.next();
     return new Response(response.body,{status:response.status,statusText:response.statusText,headers:privateHeaders(response)});
   } catch(error) {
-    return json({success:false,code:error instanceof StoreError?error.code:'ADMIN_UNAVAILABLE',error:error instanceof StoreError?error.message:'Адмінпанель тимчасово недоступна.'},error instanceof StoreError?error.status:503);
+    return json({success:false,code:error instanceof StoreError?error.code:'ADMIN_UNAVAILABLE',error:error instanceof StoreError?error.message:'Адмінпанель тимчасово недоступна.',
+      ...(error instanceof StoreError && error.code==='ADMIN_NOT_CONFIGURED' ? {configuration:error.configuration} : {}),
+    },error instanceof StoreError?error.status:503);
   }
 }

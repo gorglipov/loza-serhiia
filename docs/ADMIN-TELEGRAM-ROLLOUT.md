@@ -60,7 +60,7 @@ Preview цієї гілки: `codex-admin-telegram.loza-serhiia.pages.dev` ([в�
 
 | Назва | Тип | Значення |
 | --- | --- | --- |
-| `ACCESS_TEAM_DOMAIN` | Variable | `https://ВАША-КОМАНДА.cloudflareaccess.com`, без `/` у кінці |
+| `ACCESS_TEAM_DOMAIN` | Variable | Домен команди `ВАША-КОМАНДА.cloudflareaccess.com` або повний HTTPS URL; код нормалізує його до HTTPS issuer |
 | `ACCESS_AUD` | Variable | Application Audience (AUD), 64 hex символи, з цього Access application |
 | `ADMIN_EMAILS` | Secret | Точна email адреса адміністратора; за потреби кілька через кому |
 | `ADMIN_CSRF_SECRET` | Secret | Нове випадкове значення щонайменше 32 символи |
@@ -129,6 +129,14 @@ Worker має окремі secrets: внесіть туди ті самі ная
 $env:LOZA_MINIFLARE_MODULE = "C:\Users\rigam\AppData\Local\npm-cache\_npx\32026684e21afda6\node_modules\miniflare\dist\src\index.js"
 & $lozaNode --test .\tests\admin-preview.test.mjs
 ```
+
+Регресійні тести форматів конфігурації та JWT:
+
+```powershell
+& $lozaNode --test .\tests\access-configuration.test.mjs .\tests\admin-preview.test.mjs
+```
+
+Якщо виникне `ADMIN_NOT_CONFIGURED`, відповідь міститиме `configuration` з чотирма фіксованими назвами полів і тільки прапорцями `present`/`formatValid`. Ні значення, ні довжини, ні токени не повертаються і не логуються. Коректна конфігурація без справжнього JWT усе одно дає 403. Після цього виправлення підтримуються hostname без схеми, HTTPS URL, один кінцевий `/` та зовнішні пробіли. HTTP, сторонні домени, порт, userinfo, path/query/fragment відхиляються.
 
 Для додаткового браузерного тесту на цьому комп’ютері задайте перед запуском:
 

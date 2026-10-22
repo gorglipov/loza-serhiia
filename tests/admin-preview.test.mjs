@@ -9,11 +9,13 @@ const root=new URL('../',import.meta.url),origin='https://preview.loza.test';
 let mf,db,keys,jwk,csrf,token;
 let telegramMode='ok',sent=[],calls=0;
 const audience='a'.repeat(64),admin='owner@example.test';
-const env={ACCESS_TEAM_DOMAIN:'https://loza-test.cloudflareaccess.com',ACCESS_AUD:audience,ADMIN_EMAILS:admin,ADMIN_CSRF_SECRET:'fixture-csrf-secret-'.repeat(4),CHECKOUT_SECURITY_KEY:'fixture-checkout-secret-'.repeat(4),TURNSTILE_SITE_KEY:'fixture-site-key',TURNSTILE_SECRET_KEY:'fixture-turnstile-secret',TELEGRAM_BOT_TOKEN:'12345:fixture_token',TELEGRAM_CHAT_ID:'123456'};
+const issuer='https://loza-test.cloudflareaccess.com';
+// Match the actual Preview configuration shape: bare hostname, signed HTTPS issuer.
+const env={ACCESS_TEAM_DOMAIN:'loza-test.cloudflareaccess.com',ACCESS_AUD:audience,ADMIN_EMAILS:admin,ADMIN_CSRF_SECRET:'fixture-csrf-secret-'.repeat(4),CHECKOUT_SECURITY_KEY:'fixture-checkout-secret-'.repeat(4),TURNSTILE_SITE_KEY:'fixture-site-key',TURNSTILE_SECRET_KEY:'fixture-turnstile-secret',TELEGRAM_BOT_TOKEN:'12345:fixture_token',TELEGRAM_CHAT_ID:'123456'};
 const b64=v=>Buffer.from(typeof v==='string'?v:JSON.stringify(v)).toString('base64url');
 async function jwt(changes={},header={}) {
   const now=Math.floor(Date.now()/1000),h=b64({alg:'RS256',kid:'test-key',...header});
-  const payload=b64({iss:env.ACCESS_TEAM_DOMAIN,aud:[audience],iat:now-10,exp:now+3600,type:'app',sub:'owner-sub',email:admin,...changes});
+  const payload=b64({iss:issuer,aud:[audience],iat:now-10,exp:now+3600,type:'app',sub:'owner-sub',email:admin,...changes});
   const signature=await webcrypto.subtle.sign('RSASSA-PKCS1-v1_5',keys.privateKey,Buffer.from(h+'.'+payload));
   return h+'.'+payload+'.'+Buffer.from(signature).toString('base64url');
 }
@@ -46,7 +48,7 @@ before(async()=>{
       const file=path==='/'?'index.html':path.slice(1);return new Response(await readFile(new URL(file,root)),{headers:{'Content-Type':file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':'text/html'}});
     }},outboundService:async request=>{
       const url=new URL(request.url);
-      if(url.href===env.ACCESS_TEAM_DOMAIN+'/cdn-cgi/access/certs')return Response.json({keys:[jwk]});
+      if(url.href===issuer+'/cdn-cgi/access/certs')return Response.json({keys:[jwk]});
       if(url.hostname==='challenges.cloudflare.com')return Response.json({success:true,action:'loza_checkout',hostname:new URL(origin).hostname});
       if(url.hostname==='api.telegram.org'){
         calls++;const payload=await request.json();sent.push(payload);
