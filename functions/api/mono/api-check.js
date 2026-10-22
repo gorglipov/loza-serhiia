@@ -1,50 +1,7 @@
-
-export async function onRequestPost({ request, env }) {
-  const key = request.headers.get("X-Admin-Key");
-
-  if (
-    !env.MONO_WEBHOOK_KEY ||
-    !key ||
-    key !== env.MONO_WEBHOOK_KEY
-  ) {
-    return new Response("Forbidden", {
-      status: 403
-    });
-  }
-
-  if (!env.MONO_TOKEN) {
-    return Response.json({
-      success: false,
-      error: "MONO_TOKEN is missing"
-    }, { status: 500 });
-  }
-
-  try {
-    const response = await fetch(
-      "https://api.monobank.ua/personal/client-info",
-      {
-        headers: {
-          "X-Token": env.MONO_TOKEN
-        }
-      }
-    );
-
-    if (!response.ok) {
-      return Response.json({
-        success: false,
-        bankStatus: response.status
-      });
-    }
-
-    return Response.json({
-      success: true,
-      message: "Monobank API connected"
-    });
-
-  } catch {
-    return Response.json({
-      success: false,
-      error: "Connection failed"
-    }, { status: 502 });
-  }
+import {protectAdmin} from '../../../server/access.js';
+import {json} from '../../../server/checkout.js';
+// Retire the shared-webhook-key bank probe. It must not bypass Access or trigger live calls.
+export async function onRequestPost(context){
+  return protectAdmin({...context,next:async()=>json({success:false,code:'MONO_LIVE_DISABLED',
+    error:'Живі запити до банку вимкнені. Тестовий моніторинг доступний в адмінпанелі Preview.'},409)});
 }
