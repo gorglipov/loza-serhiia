@@ -1,4 +1,4 @@
-import { body, configured, db, digest, endpoint, findReceipt, normalizeOrder, quote, rateLimit, receipt, requestKey, requireSchema, StoreError, verifyTurnstile } from "../../../server/checkout.js";
+import { body, configured, db, digest, endpoint, findReceipt, normalizeOrder, paymentBreakdown, paymentMarker, quote, rateLimit, receipt, requestKey, requireSchema, StoreError, verifyTurnstile } from "../../../server/checkout.js";
 import { queueOrder, scheduleNotifications } from '../../../server/telegram.js';
 
 export const onRequest = context => endpoint(context, "POST", async context => {
@@ -19,6 +19,10 @@ export const onRequest = context => endpoint(context, "POST", async context => {
 
   await verifyTurnstile(context, input.turnstileToken);
   const estimate = await quote(database, order.items);
+  // Recompute the payable amounts from the trusted D1 quote, never from browser totals.
+  paymentBreakdown(estimate.amountKop, order.payment.mode);
+  // Preserve the payment preference with the order; this is not proof of money received.
+  const storedComment = paymentMarker(order.payment.mode) + order.comment;
   const items = JSON.stringify(order.items);
   const id = "LOZA-" + crypto.randomUUID();
   try {
@@ -32,7 +36,7 @@ export const onRequest = context => endpoint(context, "POST", async context => {
         (order_id, request_key_hash, payload_hash, buyer_name, phone, city, delivery_method, delivery_branch, comment, items_json, demo_only)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
           id, keyHash, payloadHash, order.customer.name, order.customer.phone,
-          order.delivery.city, order.delivery.method, order.delivery.branch, order.comment, items, estimate.demoOnly ? 1 : 0
+          order.delivery.city, order.delivery.method, order.delivery.branch, storedComment, items, estimate.demoOnly ? 1 : 0
         ),
       queueOrder(database,id),
     ]);
