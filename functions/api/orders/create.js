@@ -1,75 +1,49 @@
+import { body, configured, db, digest, endpoint, findReceipt, normalizeOrder, quote, rateLimit, receipt, requestKey, requireSchema, StoreError, verifyTurnstile } from "../../../server/checkout.js";
 
-const products = Object.freeze({ "grape-demo": 50000 });
-const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-const json = (body, status) => Response.json(body, {
-  status,
-  headers: { "Cache-Control": "no-store" },
-});
-
-export async function onRequestPost({ request, env }) {
-  const origin = request.headers.get("Origin");
-  const allowedOrigins = new Set([new URL(request.url).origin, env.SITE_ORIGIN].filter(Boolean));
-  if (origin && !allowedOrigins.has(origin)) {
-    return json({ error: "Forbidden origin" }, 403);
-  }
-  if (request.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
-    return json({ error: "Expected application/json" }, 415);
+export const onRequest = context => endpoint(context, "POST", async context => {
+  const database = db(context);
+  await requireSchema(database);
+  await rateLimit(context, database, "create", 8);
+  if (!configured(context.env)) throw new StoreError("CHECKOUT_UNAVAILABLE", "Оформлення тимчасово недоступне. Спробуйте пізніше.", 503);
+  const input = await body(context.request);
+  const order = normalizeOrder(input);
+  const keyHash = await requestKey(context.request);
+  const payloadHash = await digest(JSON.stringify(order));
+  const existing = await findReceipt(database, keyHash);
+  if (existing) {
+    if (existing.payload_hash !== payloadHash) throw new StoreError("IDEMPOTENCY_CONFLICT", "Попередній запит уже прийнято з іншими даними. Перевірте його підтвердження.", 409);
+    return receipt(existing);
   }
 
-  let body;
+  await verifyTurnstile(context, input.turnstileToken);
+  const estimate = await quote(database, order.items);
+  const items = JSON.stringify(order.items);
+  const id = "LOZA-" + crypto.randomUUID();
   try {
-    body = await request.json();
-  } catch {
-    return json({ error: "Invalid JSON" }, 400);
-  }
-
-  const productId = body?.product;
-  const quantity = body?.quantity;
-  if (typeof productId !== "string" || !Object.hasOwn(products, productId) ||
-      !Number.isInteger(quantity) || quantity < 1 || quantity > 5) {
-    return json({ error: "Invalid product or quantity" }, 400);
-  }
-
-  const key = request.headers.get("Idempotency-Key");
-  if (key !== null && !uuid.test(key)) {
-    return json({ error: "Invalid idempotency key" }, 400);
-  }
-  if (!env.DB || typeof env.DB.prepare !== "function") {
-    return json({ error: "Order storage is unavailable" }, 503);
-  }
-
-  // Only the server catalog defines prices; browser price/amount/status are ignored.
-  const amount = products[productId] * quantity;
-  const orderId = "TEST-" + (key ? key.toLowerCase() : crypto.randomUUID());
-
-  try {
-    // Reusing a request key returns the same order, including after a lost response.
-    // Existing clients without a key keep the original create-order behavior.
-    const inserted = await env.DB.prepare(
-      `INSERT INTO orders (id, amount_kop, status)
-       VALUES (?, ?, ?)
-       ON CONFLICT(id) DO NOTHING`
-    ).bind(orderId, amount, "pending").run();
-    if (!inserted.success) throw new Error("Order insert failed");
-
-    const order = await env.DB.prepare(
-      "SELECT id, amount_kop, status FROM orders WHERE id = ?"
-    ).bind(orderId).first();
-    if (!order) throw new Error("Order read failed");
-    if (order.amount_kop !== amount) {
-      return json({ error: "Request key already belongs to a different order" }, 409);
+    // batch is a transaction. The migration trigger validates, snapshots prices and
+    // reserves ALL items inside this transaction; any failure rolls everything back.
+    await database.batch([
+      database.prepare(`INSERT INTO orders (id, amount_kop, status)
+        SELECT ?, SUM(p.price_kop * json_extract(j.value, '$.quantity')), 'pending'
+        FROM json_each(?) j JOIN products p ON p.id = json_extract(j.value, '$.productId')`).bind(id, items),
+      database.prepare(`INSERT INTO order_checkout
+        (order_id, request_key_hash, payload_hash, buyer_name, phone, city, delivery_method, delivery_branch, comment, items_json, demo_only)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+          id, keyHash, payloadHash, order.customer.name, order.customer.phone,
+          order.delivery.city, order.delivery.method, order.delivery.branch, order.comment, items, estimate.demoOnly ? 1 : 0
+        ),
+    ]);
+  } catch (error) {
+    // A concurrent retry may have committed first, or the original response was lost.
+    const saved = await findReceipt(database, keyHash);
+    if (saved) {
+      if (saved.payload_hash !== payloadHash) throw new StoreError("IDEMPOTENCY_CONFLICT", "Попередній запит уже прийнято з іншими даними. Перевірте його підтвердження.", 409);
+      return receipt(saved);
     }
-
-    return json({
-      success: true,
-      orderId: order.id,
-      amount: order.amount_kop / 100,
-      currency: "UAH",
-      status: order.status,
-      testOnly: true,
-    }, inserted.meta.changes > 0 ? 201 : 200);
-  } catch {
-    return json({ error: "Database error" }, 500);
+    if (String(error.message).includes("LOZA_STOCK_UNAVAILABLE")) throw new StoreError("STOCK_UNAVAILABLE", "Залишки змінилися. Оновіть кошик і повторіть спробу.", 409);
+    throw error;
   }
-}
+  const saved = await findReceipt(database, keyHash);
+  if (!saved) throw new Error("Receipt unavailable");
+  return receipt(saved, 201);
+});
