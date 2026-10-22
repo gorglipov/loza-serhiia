@@ -2,6 +2,7 @@
 import {test,before,beforeEach,after} from 'node:test';
 import assert from 'node:assert/strict';
 import {paymentBreakdown,normalizeOrder} from '../server/checkout.js';
+import {formatKyivTimestamp} from '../server/telegram.js';
 import {readFile} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
 import {webcrypto} from 'node:crypto';
@@ -183,6 +184,12 @@ test('payment options use trusted integer kopecks and reject invalid deposit amo
   assert.equal(normalizeOrder(checkout).payment.mode,'deposit_cod');
   assert.throws(()=>normalizeOrder({...checkout,payment:{mode:'invalid'}}),/Оберіть/);
 });
+test('order timestamps reflect Europe/Kyiv in both summer and winter, not the browser timezone',()=>{
+  assert.equal(formatKyivTimestamp('2026-10-22 21:45:31'),'23.10.2026, 00:45:31');
+  assert.equal(formatKyivTimestamp('2026-12-22 21:45:31'),'22.12.2026, 23:45:31');
+  assert.equal(formatKyivTimestamp('2026-07-15 21:45:31'),'16.07.2026, 00:45:31');
+  assert.equal(formatKyivTimestamp(null),null);
+});
 test('order commit queues one message; concurrent replay never creates duplicate orders/events',async()=>{
   const key=crypto.randomUUID();const response=await json('/api/orders/create',{data:{...checkout,amountKop:1},key});assert.equal(response.status,201);orderId=response.data.orderId;assert.equal(response.data.amountKop,30000);assert.deepEqual(response.data.payment,{mode:'deposit_cod',advanceKop:10000,codKop:20000});assert.equal(response.data.paymentVerified,false);
   await Promise.all([json('/api/orders/create',{data:checkout,key}),json('/api/orders/create',{data:checkout,key})]);await settle();
@@ -192,7 +199,11 @@ test('order commit queues one message; concurrent replay never creates duplicate
   assert.ok(savedPayment.comment.endsWith('Private comment'));
   assert.equal((await db.prepare("SELECT COUNT(*) n FROM telegram_outbox WHERE order_id=?").bind(orderId).first()).n,1);
   const event=await db.prepare('SELECT state,message_id FROM telegram_outbox WHERE order_id=?').bind(orderId).first();assert.equal(event.state,'sent');
-  const text=sent.find(x=>x.text.includes(orderId))?.text;assert.ok(text);assert.match(text,/× 2/);assert.match(text,/300.00 грн/);assert.match(text,/Передоплата 100 грн|передоплата 100 грн/);assert.match(text,/Оплата: не перевірена/);
+  const text=sent.find(x=>x.text.includes(orderId))?.text;assert.ok(text);
+  const storedTime=await db.prepare('SELECT created_at FROM order_checkout WHERE order_id=?').bind(orderId).first();
+  assert.ok(storedTime.created_at);
+  assert.ok(text.includes('Дата й час: '+formatKyivTimestamp(storedTime.created_at)+' (Київ)'));
+  assert.match(text,/× 2/);assert.match(text,/300.00 грн/);assert.match(text,/Передоплата 100 грн|передоплата 100 грн/);assert.match(text,/Оплата: не перевірена/);
   for(const pii of ['Preview Buyer','380991234567','Preview City','Private delivery','Private comment'])assert.ok(!text.includes(pii));
   assert.equal(sent.filter(x=>x.text.includes(orderId)).length,1);
 });
@@ -209,6 +220,11 @@ test('payment ledger: new order starts unpaid; admin alone can report, manually 
   const listed=await json('/api/admin/orders?status=&q=&offset=0');
   assert.equal(listed.data.paymentReady,true);
   assert.equal(listed.data.orders.find(o=>o.id===id).payment_state,'awaiting');
+  const listEntry=listed.data.orders.find(o=>o.id===id);
+  const detailTimestamp=detail.data.order.created_at;
+  assert.ok(detailTimestamp);
+  assert.equal(listEntry.created_at,detailTimestamp);
+  assert.ok(formatKyivTimestamp(detailTimestamp));
   // Buyer-supplied "paymentVerified" never changes the server's verified state.
   assert.equal((await db.prepare('SELECT state FROM loza_payment_states WHERE order_id=?').bind(id).first()).state,'awaiting');
   assert.equal((await json('/api/admin/orders/'+id+'/payment',{auth:null,data:{version:0,state:'confirmed',confirmedAfterBankCheck:true}})).status,403);
