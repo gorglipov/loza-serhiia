@@ -17,9 +17,12 @@ const clean = (value, max = 100) => String(value ?? "")
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export async function onRequest({ request, env }) {
-  const siteOrigin = env.SITE_ORIGIN || new URL(request.url).origin;
+  // Same-origin GET requests often omit the Origin header. Reject explicitly foreign origins.
+  const siteOrigin = new URL(request.url).origin;
   const origin = request.headers.get("Origin");
-  if (origin !== siteOrigin) return json({ ok: false, error: "Forbidden origin" }, 403);
+  if ((origin && origin !== siteOrigin) || request.headers.get("Sec-Fetch-Site") === "cross-site") {
+    return json({ ok: false, error: "Forbidden origin" }, 403);
+  }
   if (request.method !== "GET") return json({ ok: false, error: "Method not allowed" }, 405, siteOrigin);
 
   const apiKey = env.NOVA_POSHTA_API_KEY;
