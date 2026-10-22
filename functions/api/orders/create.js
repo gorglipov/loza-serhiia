@@ -1,4 +1,5 @@
 import { body, configured, db, digest, endpoint, findReceipt, normalizeOrder, quote, rateLimit, receipt, requestKey, requireSchema, StoreError, verifyTurnstile } from "../../../server/checkout.js";
+import { queueOrder, scheduleNotifications } from '../../../server/telegram.js';
 
 export const onRequest = context => endpoint(context, "POST", async context => {
   const database = db(context);
@@ -12,6 +13,7 @@ export const onRequest = context => endpoint(context, "POST", async context => {
   const existing = await findReceipt(database, keyHash);
   if (existing) {
     if (existing.payload_hash !== payloadHash) throw new StoreError("IDEMPOTENCY_CONFLICT", "Попередній запит уже прийнято з іншими даними. Перевірте його підтвердження.", 409);
+    scheduleNotifications(context,database);
     return receipt(existing);
   }
 
@@ -32,12 +34,14 @@ export const onRequest = context => endpoint(context, "POST", async context => {
           id, keyHash, payloadHash, order.customer.name, order.customer.phone,
           order.delivery.city, order.delivery.method, order.delivery.branch, order.comment, items, estimate.demoOnly ? 1 : 0
         ),
+      queueOrder(database,id),
     ]);
   } catch (error) {
     // A concurrent retry may have committed first, or the original response was lost.
     const saved = await findReceipt(database, keyHash);
     if (saved) {
       if (saved.payload_hash !== payloadHash) throw new StoreError("IDEMPOTENCY_CONFLICT", "Попередній запит уже прийнято з іншими даними. Перевірте його підтвердження.", 409);
+      scheduleNotifications(context,database);
       return receipt(saved);
     }
     if (String(error.message).includes("LOZA_STOCK_UNAVAILABLE")) throw new StoreError("STOCK_UNAVAILABLE", "Залишки змінилися. Оновіть кошик і повторіть спробу.", 409);
@@ -45,5 +49,6 @@ export const onRequest = context => endpoint(context, "POST", async context => {
   }
   const saved = await findReceipt(database, keyHash);
   if (!saved) throw new Error("Receipt unavailable");
+  scheduleNotifications(context,database);
   return receipt(saved, 201);
 });

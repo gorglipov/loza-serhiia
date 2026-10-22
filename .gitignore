@@ -9,3 +9,7 @@ node_modules/
 backups/
 *.backup.sql
 *.pre-store.sql
+*-backup.sql
+0002_store_cart_checked.sql
+test-results/
+workers/*.local.toml
