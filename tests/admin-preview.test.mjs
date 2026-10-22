@@ -552,14 +552,14 @@ test('payment confirmation dialog cancellation has no effect; explicit acceptanc
     const stored=await db.prepare('SELECT created_at FROM order_checkout WHERE order_id=?').bind(id).first();
     const expectedKyiv=formatKyivTimestamp(stored.created_at);
     assert.ok(expectedKyiv);
-    assert.ok(await page.getByRole('columnheader',{name:'Дата й час (Київ)'}).isVisible());
+    await page.getByRole('columnheader',{name:'Дата й час (Київ)'}).waitFor({state:'visible'});
     const orderRow=page.getByRole('row').filter({hasText:id});
     const rowText=await orderRow.innerText();
     assert.ok(rowText.includes(expectedKyiv.split(', ')[0]));
     assert.ok(rowText.includes(expectedKyiv.split(', ')[1]));
     assert.ok(rowText.includes('за Києвом'));
     await orderRow.getByRole('button',{name:'Деталі'}).click();
-    assert.ok((await page.getByRole('dialog').innerText()).includes(expectedKyiv+' (Київ)'));
+    await page.getByRole('dialog').getByText(expectedKyiv+' (Київ)',{exact:true}).waitFor({state:'visible'});
     page.setDefaultTimeout(8000);
     const select=page.getByLabel('Статус оплати',{exact:true});await select.selectOption('confirmed');
     page.once('dialog',d=>d.dismiss());await page.getByRole('button',{name:'Зберегти статус оплати'}).click();
@@ -576,4 +576,24 @@ test('installed 0009 stays readable while missing audit guards block writes',asy
     assert.equal((await json('/api/admin/orders')).status,200);
     const result=await json('/api/admin/orders/LEGACY-1/payment',{data:{version:0,state:'confirmed',confirmedAfterBankCheck:true}});assert.equal(result.status,503);assert.equal(result.data.code,'PAYMENT_MIGRATION_REQUIRED');
   }finally{await apply('migrations/0010_payment_audit_guards.sql');}
+});
+
+// The browser clock must never change the Kyiv rendering of D1's UTC timestamp.
+test('Kyiv order table and details agree in summer and winter from a Los Angeles browser',{skip:!process.env.LOZA_PLAYWRIGHT_MODULE,timeout:30000},async()=>{
+  const created=await json('/api/orders/create',{data:{...checkout,items:[{productId:'loza-004',quantity:2}]}});assert.equal(created.status,201);const id=created.data.orderId;
+  const {chromium}=await import(pathToFileURL(process.env.LOZA_PLAYWRIGHT_MODULE).href),browser=await chromium.launch({channel:'msedge',headless:true});
+  try{
+    for(const width of [390,1440])for(const [utc,expected] of [['2026-07-15 21:45:31','16.07.2026, 00:45:31'],['2026-12-22 21:45:31','22.12.2026, 23:45:31']]){
+      await db.prepare('UPDATE order_checkout SET created_at=? WHERE order_id=?').bind(utc,id).run();
+      const page=await browser.newPage({viewport:{width,height:900},timezoneId:'America/Los_Angeles',extraHTTPHeaders:{'Cf-Access-Jwt-Assertion':token}}),errors=[];
+      page.on('pageerror',e=>errors.push(e.message));page.setDefaultTimeout(8000);
+      await page.goto((await mf.ready).origin+'/admin');await page.getByRole('heading',{name:'Замовлення за статусами'}).waitFor();await page.getByRole('button',{name:'Замовлення',exact:true}).click();
+      await page.getByRole('columnheader',{name:'Дата й час (Київ)'}).waitFor();
+      // Search also covers winter timestamps sorted ahead of the present date.
+      await page.getByRole('searchbox').fill(id);const row=page.getByRole('row').filter({hasText:id});await row.waitFor();
+      const clock=row.locator('.order-clock');assert.equal(await clock.locator('strong').innerText(),expected.split(', ')[0]);assert.equal(await clock.locator('span').innerText(),expected.split(', ')[1]);assert.equal(await clock.locator('small').innerText(),'за Києвом');
+      await row.getByRole('button',{name:'Деталі'}).click();await page.getByRole('dialog').getByText(expected+' (Київ)',{exact:true}).waitFor();
+      assert.deepEqual(errors,[]);assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.close();
+    }
+  }finally{await browser.close();}
 });
