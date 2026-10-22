@@ -1,5 +1,5 @@
 const encoder = new TextEncoder();
-export const MAX_QUANTITY = 5;
+export const MAX_QUANTITY = 20;
 export const DELIVERY_METHODS = [
   { id: "nova_poshta", name: "Нова пошта" },
   { id: "ukrposhta", name: "Укрпошта" },
@@ -52,7 +52,7 @@ export function db(context) {
 }
 
 export async function requireSchema(database) {
-  const row = await database.prepare("SELECT version FROM loza_store_migrations WHERE version = ?").bind("0005_manual_availability").first();
+  const row = await database.prepare("SELECT version FROM loza_store_migrations WHERE version = ?").bind("0007_stock_inventory").first();
   if (!row) throw new StoreError("STORE_UNAVAILABLE", "Магазин тимчасово недоступний. Спробуйте пізніше.", 503);
 }
 
@@ -87,7 +87,7 @@ export function normalizeItems(input) {
   const items = input.map(item => {
     if (!item || typeof item.productId !== "string" || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(item.productId) ||
       !Number.isInteger(item.quantity) || item.quantity < 1 || item.quantity > MAX_QUANTITY || seen.has(item.productId)) {
-      throw new StoreError("INVALID_ITEMS", "Перевірте товари та кількість: від 1 до 5 штук кожного.");
+      throw new StoreError("INVALID_ITEMS", "Перевірте товари та кількість: від 1 до 20 лоз кожного сорту.");
     }
     seen.add(item.productId);
     return { productId: item.productId, quantity: item.quantity };
@@ -181,7 +181,7 @@ export async function quote(database, items) {
   const byId = new Map(rows.results.map(product => [product.id, product]));
   const lines = items.map(item => {
     const product = byId.get(item.productId);
-    if (!product || product.is_demo || !product.in_stock || !Number.isSafeInteger(product.price_kop) || product.price_kop < 1 || product.confirmed_price_kop !== product.price_kop) {
+    if (!product || product.is_demo || !product.in_stock || product.stock < item.quantity || !Number.isSafeInteger(product.price_kop) || product.price_kop < 1 || product.confirmed_price_kop !== product.price_kop) {
       throw new StoreError("STOCK_UNAVAILABLE", "Наявність або ціна товару змінилася. Оновіть кошик.", 409);
     }
     return { productId: product.id, name: product.name, quantity: item.quantity, unitPriceKop: product.price_kop, lineTotalKop: product.price_kop * item.quantity, stock: product.stock, isDemo: Boolean(product.is_demo) };

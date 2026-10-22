@@ -5,16 +5,18 @@ import {readFile} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
 const {Miniflare,convertV4MiniflareOptions}=await import(pathToFileURL(process.env.LOZA_MINIFLARE_MODULE || './node_modules/miniflare/dist/src/index.js').href);
 const root=new URL('../',import.meta.url);
-async function migrate(db,name){
-  const source=await readFile(new URL('migrations/'+name+'.sql',root),'utf8');let chunk='',trigger=false;
+async function migrationStatements(name){
+  const source=await readFile(new URL('migrations/'+name+'.sql',root),'utf8');let chunk='',trigger=false;const statements=[];
   for(const line of source.split(/\r?\n/)){
     if(!line.trim() || line.trim().startsWith('--'))continue;
     chunk+=line+'\n';if(/^CREATE TRIGGER/i.test(chunk.trim()))trigger=true;
-    if((trigger && line.trim()==='END;') || (!trigger && /;\s*$/.test(line))){await db.prepare(chunk).run();chunk='';trigger=false;}
+    if((trigger && line.trim()==='END;') || (!trigger && /;\s*$/.test(line))){statements.push(chunk);chunk='';trigger=false;}
   }
   assert.equal(chunk.trim(),'');
+  return statements;
 }
-test('0004 then 0005 preserve existing orders, bank events, Telegram settings/outbox and audit on Production-shaped D1',async()=>{
+async function migrate(db,name){for(const sql of await migrationStatements(name))await db.prepare(sql).run();}
+test('0004, 0005 and atomic 0007 preserve existing orders, bank events, Telegram settings/outbox and audit on Production-shaped D1',async()=>{
   const options={modules:true,script:'export default {fetch(){return new Response("local fixture");}}',compatibilityDate:'2026-10-22',d1Databases:['DB']};
   const mf=new Miniflare(convertV4MiniflareOptions?convertV4MiniflareOptions(options):options);
   try{
@@ -67,5 +69,30 @@ test('0004 then 0005 preserve existing orders, bank events, Telegram settings/ou
     // Only 0005 is safe to replay after switching to manual availability; never reapply 0004 alone.
     await migrate(db,'0005_manual_availability');assert.deepEqual(await snapshot(),before);
     assert.equal((await db.prepare('SELECT COUNT(*) n FROM product_catalog WHERE confirmed_price_kop IS NOT NULL').first()).n,0);
+    // A pre-0007 manual-mode order never deducted stock. Cancelling it must not invent a return.
+    const p=source.find(p=>p.id==='loza-002');
+    await db.prepare("INSERT INTO admin_mutations(id,actor,kind,target,expected_version,payload_json) SELECT 'fixture-stock','owner@example.test','product','loza-002',version,? FROM admin_product_versions WHERE product_id='loza-002'")
+      .bind(JSON.stringify({name:p.name,priceKop:p.priceKop,stock:20,available:1,priceConfirmed:1,characteristicsConfirmed:0,detailsJson:JSON.stringify(p.details)})).run();
+    await db.prepare("INSERT INTO orders(id,amount_kop,status) VALUES('BEFORE-STOCK',?,'pending')").bind(p.priceKop*2).run();
+    await db.prepare(`INSERT INTO order_checkout(order_id,request_key_hash,payload_hash,buyer_name,phone,city,delivery_method,delivery_branch,comment,items_json,demo_only)
+      VALUES('BEFORE-STOCK',?,?,?,?,?,?,?,?,?,0)`)
+      .bind('e'.repeat(64),'f'.repeat(64),'Fixture Buyer','+380991234567','Fixture City','nova_poshta','Fixture Branch','',JSON.stringify([{productId:p.id,quantity:2}])).run();
+    const before7=await snapshot(),stockBefore=(await db.prepare('SELECT stock FROM products WHERE id=?').bind(p.id).first()).stock;
+    assert.equal(stockBefore,20);
+    const statements=await migrationStatements('0007_stock_inventory');
+    const schemaBefore=(await db.prepare("SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY name").all()).results;
+    // Failure after the table swap must roll back the entire migration, including every DDL statement.
+    await assert.rejects(db.batch([...statements.map(sql=>db.prepare(sql)),db.prepare('SELECT * FROM intentional_missing_fixture_table')]));
+    assert.deepEqual((await db.prepare("SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY name").all()).results,schemaBefore);
+    assert.deepEqual(await snapshot(),before7);
+    for(let i=0;i<2;i++){
+      await db.batch(statements.map(sql=>db.prepare(sql)));
+      assert.deepEqual(await snapshot(),before7);
+      assert.equal((await db.prepare('SELECT COUNT(*) n FROM order_stock_reservations').first()).n,0);
+      assert.deepEqual((await db.prepare('PRAGMA foreign_key_check').all()).results,[]);
+    }
+    await db.prepare("INSERT INTO admin_mutations(id,actor,kind,target,expected_version,payload_json) VALUES('fixture-old-cancel','owner@example.test','status','BEFORE-STOCK',0,'{\"status\":\"cancelled\"}')").run();
+    assert.equal((await db.prepare('SELECT stock FROM products WHERE id=?').bind(p.id).first()).stock,stockBefore);
+    assert.equal((await db.prepare("SELECT COUNT(*) n FROM admin_stock_returns WHERE order_id='BEFORE-STOCK'").first()).n,0);
   }finally{await mf.dispose();}
 });
