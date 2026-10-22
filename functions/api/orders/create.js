@@ -23,7 +23,7 @@ export const onRequest = context => endpoint(context, "POST", async context => {
   const id = "LOZA-" + crypto.randomUUID();
   try {
     // batch is a transaction. The migration trigger validates, snapshots prices and
-    // reserves ALL items inside this transaction; any failure rolls everything back.
+    // checks manual availability inside this transaction, without changing any quantities.
     await database.batch([
       database.prepare(`INSERT INTO orders (id, amount_kop, status)
         SELECT ?, SUM(p.price_kop * json_extract(j.value, '$.quantity')), 'pending'
@@ -44,7 +44,7 @@ export const onRequest = context => endpoint(context, "POST", async context => {
       scheduleNotifications(context,database);
       return receipt(saved);
     }
-    if (String(error.message).includes("LOZA_STOCK_UNAVAILABLE")) throw new StoreError("STOCK_UNAVAILABLE", "Залишки змінилися. Оновіть кошик і повторіть спробу.", 409);
+    if (String(error.message).includes("LOZA_STOCK_UNAVAILABLE")) throw new StoreError("STOCK_UNAVAILABLE", "Наявність або ціна змінилася. Оновіть кошик і повторіть спробу.", 409);
     throw error;
   }
   const saved = await findReceipt(database, keyHash);
