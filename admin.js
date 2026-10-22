@@ -6,7 +6,26 @@
   const eventLabels={queued:'У черзі',retry:'Повторна спроба',sending:'Надсилання',sent:'Надіслано',failed:'Помилка',uncertain:'Перевірте доставку'};
   const paymentLabels={awaiting:'Очікуємо оплату',reported:'Покупець повідомив',confirmed:'Надходження підтверджено вручну',not_paid:'Не оплачено'};
   const money=kop=>kop===null?'Ціну не задано':new Intl.NumberFormat('uk-UA',{style:'currency',currency:'UAH'}).format(kop/100);
-  const date=value=>value?new Date(value.replace(' ','T')+'Z').toLocaleString('uk-UA'):'Попереднє замовлення';
+  // D1 CURRENT_TIMESTAMP is UTC, regardless of the administrator's browser timezone.
+  const kyivClock = new Intl.DateTimeFormat('uk-UA',{
+    timeZone:'Europe/Kyiv',year:'numeric',month:'2-digit',day:'2-digit',
+    hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'
+  });
+  function kyivParts(value){
+    if(typeof value!=='string' || !value.trim())return null;
+    const utc=/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}$/.test(value)
+      ? value.replace(' ','T')+'Z' : value;
+    const stamp=new Date(utc);
+    if(Number.isNaN(stamp.getTime()))return null;
+    return Object.fromEntries(kyivClock.formatToParts(stamp).filter(p=>p.type!=='literal').map(p=>[p.type,p.value]));
+  }
+  const date=value=>{const d=kyivParts(value);return d?d.day+'.'+d.month+'.'+d.year+', '+d.hour+':'+d.minute+':'+d.second+' (Київ)':'Дата невідома';};
+  function orderClock(value){
+    const d=kyivParts(value),element=el('div',undefined,'order-clock');
+    if(!d){element.append(el('span','Дата невідома'));return element;}
+    element.append(el('strong',d.day+'.'+d.month+'.'+d.year),el('span',d.hour+':'+d.minute+':'+d.second),el('small','за Києвом'));
+    return element;
+  }
   function el(tag,text,cls) {const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;}
   function notice(text,error=false){$('notice').hidden=false;$('notice').className=error?'error':'';$('notice').textContent=text;}
   async function api(path,data,key) {
@@ -86,7 +105,7 @@
   async function editOrder(id) {
     try{
       const {order:o,items,payment,paymentReady,paymentTerms}=await api('orders/'+encodeURIComponent(id));openEditor('Замовлення');
-      const dl=el('dl',undefined,'detail');for(const [label,value]of [['Номер',o.id],['Дата',date(o.created_at)],['Сума',money(o.amount_kop)],['Покупець',o.buyer_name],['Телефон',o.phone],['Доставка',[o.city,o.delivery_method==='nova_poshta'?'Нова пошта':o.delivery_method==='ukrposhta'?'Укрпошта':'',o.delivery_branch].filter(Boolean).join(' · ')],['Умови оплати',paymentTerms?.mode ? 'Передоплата '+money(paymentTerms.advanceKop)+', післяплата '+money(paymentTerms.codKop) : 'Не обрано або некоректні умови оплати'],['Статус оплати',paymentReady?(payment?paymentLabels[payment.state] || payment.state:'Немає умов оплати'):'Облік оплати ще не налаштовано'],['Коментар',(o.comment||'').replace(/^\[LOZA_PAYMENT:(?:full|deposit_cod)\] /,'') || '—']])dl.append(el('dt',label),el('dd',value || '—'));
+      const dl=el('dl',undefined,'detail');for(const [label,value]of [['Номер',o.id],['Дата й час (Київ)',date(o.created_at)],['Сума',money(o.amount_kop)],['Покупець',o.buyer_name],['Телефон',o.phone],['Доставка',[o.city,o.delivery_method==='nova_poshta'?'Нова пошта':o.delivery_method==='ukrposhta'?'Укрпошта':'',o.delivery_branch].filter(Boolean).join(' · ')],['Умови оплати',paymentTerms?.mode ? 'Передоплата '+money(paymentTerms.advanceKop)+', післяплата '+money(paymentTerms.codKop) : 'Не обрано або некоректні умови оплати'],['Статус оплати',paymentReady?(payment?paymentLabels[payment.state] || payment.state:'Немає умов оплати'):'Облік оплати ще не налаштовано'],['Коментар',(o.comment||'').replace(/^\[LOZA_PAYMENT:(?:full|deposit_cod)\] /,'') || '—']])dl.append(el('dt',label),el('dd',value || '—'));
       $('editorBody').append(dl,table(['Товар','Кількість','Сума'],items.map(i=>[i.product_name,i.quantity,money(i.line_total_kop)])));
       const form=el('form'),label=el('label','Статус замовлення'),select=el('select');
       const next={pending:['confirmed','cancelled'],confirmed:['shipped','cancelled'],shipped:['completed']}[o.status] || [];
@@ -164,7 +183,12 @@
   async function orders() {
     const paymentNotice=el('p',undefined,'hint'),results=el('div'),pagination=el('div',undefined,'pagination');let search='',status='',query=0;
     async function refresh(q=search,s=status){const id=++query;search=q;status=s;try{const data=await api('orders?'+new URLSearchParams({q,status,offset}));if(id!==query)return;
-      results.replaceChildren(table(['Номер / дата','Товари','Сума','Доставка','Оплата',''],data.orders.map(o=>{const number=el('div',o.id,'order-id');number.append(el('small',date(o.created_at)));return[number,o.items.map(i=>i.name+' × '+i.quantity).join(', ') || 'Попереднє оформлення',money(o.amount_kop),badge(o.status),o.payment_state?paymentLabels[o.payment_state]||o.payment_state:'—',button('Деталі',()=>editOrder(o.id))];})));
+      results.replaceChildren(table(['Номер замовлення','Дата й час (Київ)','Товари','Сума','Статус','Оплата',''],data.orders.map(o=>{
+        const number=el('div',o.id,'order-id');
+        return [number,orderClock(o.created_at),o.items.map(i=>i.name+' × '+i.quantity).join(', ') || 'Попереднє оформлення',
+          money(o.amount_kop),badge(o.status),o.payment_state?paymentLabels[o.payment_state]||o.payment_state:'—',
+          button('Деталі',()=>editOrder(o.id))];
+      })));
       paymentNotice.textContent=data.paymentReady?'Оплата відстежується окремо від статусу замовлення. Підтвердження надходження здійснює лише власник.':'Облік оплати ще не ввімкнено: спочатку застосуйте міграцію 0009 до Preview D1.';
       pagination.replaceChildren();if(offset>0)pagination.append(button('← Попередні',()=>{offset=Math.max(0,offset-50);refresh();}));if(data.hasMore)pagination.append(button('Наступні →',()=>{offset+=50;refresh();}));
     }catch(error){notice(error.message,true);}}
