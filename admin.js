@@ -49,7 +49,7 @@
     const reviewedLabel=el('label',undefined,'check wide'),reviewed=el('input');reviewed.type='checkbox';reviewed.checked=!!product.characteristics_confirmed;reviewedLabel.append(reviewed,document.createTextNode('Характеристики перевірено власником'));grid.append(reviewedLabel);
     if(product.source)form.append(el('p',`Джерело: ${product.source.document}, сторінка ${product.source.page}, рядок ${product.source.row}. Ціна у PDF: ${money(product.source.priceKop)}. Оригінальні дані джерела зберігаються окремо. Фото не потрібне.`,'hint'));
     price.addEventListener('input',()=>confirmed.checked=false);
-    form.append(grid,el('p','Наявність змінюєте лише ви. Замовлення та їх скасування її не змінюють. Для купівлі також потрібна підтверджена ціна.','hint'));
+    form.append(grid,el('p','Наявність змінюєте лише ви. Замовлення та скасування її не змінюють. Для купівлі потрібна підтверджена вами ціна. Ліміт покупки: до 20 лоз одного сорту й до 100 лоз загалом; це не складський залишок.','hint'));
     const submit=el('button','Зберегти товар','primary');submit.type='submit';form.append(submit);
     form.addEventListener('submit',e=>{e.preventDefault();saving(async()=>{
       const value=price.value.trim().replace(',','.');if(value && !/^\d{1,7}(\.\d{1,2})?$/.test(value))throw new Error('Введіть ціну, наприклад 500,00.');
@@ -57,6 +57,13 @@
       const details={kishmish:kish.checked};Object.entries(fields).forEach(([key,input])=>details[key]=input.value);
       await api('products/'+encodeURIComponent(product.id),{version:product.version,name:name.value,priceKop,priceConfirmed:confirmed.checked,characteristicsConfirmed:reviewed.checked,available:active.checked,details});dialog.close();await load();
     });});$('editorBody').append(form);
+  }
+  function renameProduct(product){
+    openEditor('Змінити назву сорту');const form=el('form'),name=field(form,'Назва сорту',product.name,{max:160,required:true});
+    form.append(el('p','Зміниться назва в каталозі, пошуку та нових замовленнях. Код сорту, ціна, наявність, джерело PDF та історія старих замовлень залишаються.','hint'));
+    const submit=el('button','Зберегти назву','primary');submit.type='submit';form.append(submit);form.addEventListener('submit',event=>{event.preventDefault();saving(async()=>{
+      await api('products/'+encodeURIComponent(product.id),{version:product.version,name:name.value,priceKop:product.price_kop,priceConfirmed:product.price_kop!==null && product.confirmed_price_kop===product.price_kop,characteristicsConfirmed:Boolean(product.characteristics_confirmed),available:product.inStock,details:product.details});dialog.close();await load();return 'Назву сорту оновлено. Зміну записано в історію.';
+    });});$('editorBody').append(form);name.focus();
   }
   async function editOrder(id) {
     try{
@@ -66,7 +73,7 @@
       const form=el('form'),label=el('label','Статус замовлення'),select=el('select');
       const next={pending:['confirmed','cancelled'],confirmed:['shipped','cancelled'],shipped:['completed']}[o.status] || [];
       [o.status,...next].forEach(status=>{const option=el('option',labels[status] || status);option.value=status;select.append(option);});label.append(select);form.append(label);form.className='actions';
-      if(next.length){const submit=el('button','Змінити статус','primary');submit.type='submit';form.append(submit);form.addEventListener('submit',e=>{e.preventDefault();saving(async()=>{if(select.value===o.status)return;if(select.value==='cancelled' && !confirm('Скасувати замовлення? Наявність сортів не зміниться.'))return;await api('orders/'+encodeURIComponent(id)+'/status',{version:o.version,status:select.value});dialog.close();await load();});});}
+      if(next.length){const submit=el('button','Змінити статус','primary');submit.type='submit';form.append(submit);form.addEventListener('submit',e=>{e.preventDefault();saving(async()=>{if(select.value===o.status)return;if(select.value==='cancelled' && !confirm('Скасувати замовлення? Ручна наявність сортів не зміниться.'))return;await api('orders/'+encodeURIComponent(id)+'/status',{version:o.version,status:select.value});dialog.close();await load();});});}
       $('editorBody').append(form);
     }catch(error){notice(error.message,true);}
   }
@@ -84,7 +91,7 @@
       label.append(toggle,el('span',p.inStock?'В наявності':'Немає в наявності'));
       toggle.addEventListener('change',async()=>{const next=toggle.checked;if(busy){toggle.checked=p.inStock;return;}toggle.disabled=true;let applied=false;try{await saving(async()=>{await api('products/'+encodeURIComponent(p.id)+'/availability',{version:p.version,inStock:next});applied=true;await refresh(currentQuery,currentFilter);return 'Наявність сорту оновлено.';});}finally{if(!applied)toggle.checked=p.inStock;toggle.disabled=false;}});return label;
     }
-    async function refresh(q='',filter='all'){currentQuery=q;currentFilter=filter;const id=++query;try{const data=await api('products?'+new URLSearchParams({q,filter}));if(id!==query)return;results.replaceChildren(table(['Товар','Ціна','Наявність',''],data.products.map(p=>[p.name,money(p.price_kop),availabilitySwitch(p),button('Редагувати',()=>editProduct(p))])));}catch(error){notice(error.message,true);}}
+    async function refresh(q='',filter='all'){currentQuery=q;currentFilter=filter;const id=++query;try{const data=await api('products?'+new URLSearchParams({q,filter}));if(id!==query)return;results.replaceChildren(table(['Товар','Ціна','Наявність','Дії'],data.products.map(p=>{const actions=el('div',undefined,'actions');actions.append(button('Змінити назву',()=>renameProduct(p)),button('Редагувати',()=>editProduct(p)));return[p.name,money(p.price_kop),availabilitySwitch(p),actions];})));}catch(error){notice(error.message,true);}}
     const bar=searchToolbar([['all','Усі товари'],['active','В наявності'],['inactive','Немає в наявності'],['demo','Демонстраційні']],refresh,'Пошук за назвою або кодом');
     const bulk=el('section',undefined,'card csv-tools');bulk.append(el('h2','Масове редагування CSV'),el('p','Завантажте актуальний файл усіх 107 сортів, внесіть зміни та перевірте перед імпортом. Ціна — у гривнях; підтвердження й доступність — 0 або 1. Фото не потрібні.','hint'));
     bulk.append(button('Завантажити CSV',()=>saving(async()=>{const data=await api('catalog/export');const url=URL.createObjectURL(new Blob([data.csv],{type:'text/csv;charset=utf-8'})),link=el('a');link.href=url;link.download='loza-catalog.csv';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);})),button('Імпортувати CSV',()=>importCatalog()));
@@ -92,7 +99,7 @@
   }
   function importCatalog(){
     openEditor('Імпорт каталогу');const form=el('form'),file=field(form,'CSV-файл','',{type:'file'});file.accept='.csv,text/csv';file.required=true;
-    const message=el('p','Порожня ціна залишає «Ціну уточнюйте». Наявність задається available=1 або 0, кількість вводити не потрібно. Для купівлі також потрібна підтверджена ціна. Імпорт не змінює початкове джерело PDF.','hint'),preview=el('div'),status=el('p');status.setAttribute('role','status');
+    const message=el('p','Порожня ціна залишає «Ціну уточнюйте». Ручна наявність — available=1 або 0. Ціну для продажу підтверджує власник через price_confirmed=1. Складські кількості не ведуться. Назву можна змінити в name; початкове джерело PDF зберігається.','hint'),preview=el('div'),status=el('p');status.setAttribute('role','status');
     const check=el('button','Перевірити файл','primary');check.type='submit';let source='',result=null,key=null;
     const apply=button('Застосувати імпорт',()=>saving(async()=>{if(!result)return;const data=await api('catalog/import',{csv:source,previewHash:result.previewHash},key);dialog.close();await load();return `Імпортовано ${data.count} товарів. Зміни записано в історію.`;}),true);apply.hidden=true;
     file.addEventListener('change',()=>{result=null;source='';key=null;apply.hidden=true;preview.replaceChildren();status.textContent='';});
@@ -126,11 +133,70 @@
     const rows=data.events.map(e=>{const retry=el('span');if(['retry','failed','uncertain'].includes(e.state))retry.append(button('Повторити',()=>saving(async()=>{let allowDuplicateRisk=false;if(e.state==='uncertain'){allowDuplicateRisk=confirm('Telegram міг уже отримати це повідомлення. Ви перевірили чат і погоджуєтеся на можливий дубль?');if(!allowDuplicateRisk)return;}await api('telegram/retry',{eventId:e.id,allowDuplicateRisk});await load();})));return[e.event_key,badge(e.state,eventLabels),e.attempts,e.last_error || '—',retry];});
     return[card,el('h2','Черга сповіщень'),table(['Подія','Стан','Спроб','Результат',''],rows)];
   }
+  const supportLabels={new:'Нове',in_progress:'В роботі',resolved:'Вирішено'};
+  async function showSupport(id){
+    openEditor('Звернення підтримки');
+    try{
+      const data=await api('support/'+encodeURIComponent(id)),ticket=data.ticket;
+      $('editorBody').append(el('p',ticket.id,'order-id'),el('p',date(ticket.created_at),'muted'),el('h3','Контакт для відповіді'));
+      const link=el('a',ticket.contact);link.href=ticket.contact_type==='telegram'?'https://t.me/'+ticket.contact.slice(1):'tel:'+ticket.contact;link.rel='noreferrer';if(ticket.contact_type==='telegram')link.target='_blank';$('editorBody').append(link,el('h3','Повідомлення'),el('p',ticket.message,'support-message'));
+      const form=el('form',undefined,'actions'),label=el('label','Статус звернення'),select=el('select');Object.entries(supportLabels).forEach(([value,text])=>{const option=el('option',text);option.value=value;select.append(option);});select.value=ticket.status;label.append(select);form.append(label);
+      const save=el('button','Зберегти статус','primary');save.type='submit';form.append(save);form.addEventListener('submit',event=>{event.preventDefault();saving(async()=>{if(select.value===ticket.status)return;await api('support/'+encodeURIComponent(id)+'/status',{version:ticket.version,status:select.value});dialog.close();await load();});});$('editorBody').append(form);
+      if(data.notification){const n=data.notification;$('editorBody').append(el('h3','Сповіщення Telegram'),el('p',(eventLabels[n.state] || n.state)+' · спроб: '+n.attempts,'muted'));
+        if(['retry','failed','uncertain'].includes(n.state))$('editorBody').append(button('Повторити сповіщення',()=>saving(async()=>{let allowDuplicateRisk=false;if(n.state==='uncertain'){allowDuplicateRisk=confirm('Перевірте Telegram: повідомлення могло вже надійти. Повторити з ризиком дубля?');if(!allowDuplicateRisk)return;}await api('support/'+encodeURIComponent(id)+'/retry',{allowDuplicateRisk});dialog.close();await load();})));
+      }
+      if(data.actions.length)$('editorBody').append(el('h3','Історія звернення'),table(['Коли','Адміністратор','Статус'],data.actions.map(a=>[date(a.created_at),a.actor,supportLabels[a.status]])));
+    }catch(error){notice(error.message,true);}
+  }
+  async function support(){
+    const results=el('div'),pagination=el('div',undefined,'pagination');let currentQuery='',currentStatus='',query=0;
+    async function refresh(q=currentQuery,status=currentStatus){currentQuery=q;currentStatus=status;const id=++query;try{
+      const data=await api('support?'+new URLSearchParams({q,status,offset}));if(id!==query)return;
+      results.replaceChildren(table(['Номер / дата','Причина','Контакт','Статус',''],data.tickets.map(ticket=>[ticket.id+' · '+date(ticket.created_at),data.reasons[ticket.reason] || ticket.reason,ticket.contact,badge(ticket.status,supportLabels),button('Відкрити звернення',()=>showSupport(ticket.id))])));
+      pagination.replaceChildren();if(offset>0)pagination.append(button('← Попередні',()=>{offset=Math.max(0,offset-50);refresh();}));if(data.tickets.length===50)pagination.append(button('Наступні →',()=>{offset+=50;refresh();}));
+    }catch(error){notice(error.message,true);}}
+    const bar=searchToolbar([['','Усі звернення'],...Object.entries(supportLabels)],(q,s)=>{offset=0;refresh(q,s);},'Номер звернення або контакт');await refresh();return[el('p','Контакти й повідомлення доступні лише авторизованому адміністратору. У Telegram надходить тільки номер звернення та причина.','hint'),bar,results,pagination];
+  }
+  async function mono(){
+    const data=await api('mono'),card=el('section',undefined,'card mono-intro');
+    card.append(el('p','ТІЛЬКИ PREVIEW · ТЕСТОВІ ДАНІ','eyebrow'),el('h2','Надходження під контролем'),
+      el('p','Живе підключення до monobank заблоковане. Тут можна перевірити роботу на синтетичних транзакціях. Реальних переказів і приймання платежів немає.','hint'),
+      el('p','Збіг суми й часу — лише підказка. Замовлення не отримує статус «оплачено» автоматично.','hint'));
+    if(!data.schemaReady){card.append(el('p','Потрібна міграція 0006 для окремої Preview D1. Решта магазину працює без неї.','muted'));return[card];}
+    if(data.mode!=='fixture'){card.append(el('p','Моніторинг у цьому середовищі вимкнений.','muted'));return[card];}
+    const actions=el('div',undefined,'actions');actions.append(button('Перевірити тестові надходження',()=>saving(async()=>{await api('mono/sync',{});await load();return 'Тестову виписку перевірено. Реальних банківських запитів не було.';}),true));
+    actions.append(button(data.settings.notifications_enabled?'Вимкнути тестові сповіщення':'Увімкнути тестові сповіщення',()=>saving(async()=>{
+      if(!data.settings.notifications_enabled && !confirm('Увімкнути надсилання синтетичних надходжень у ваш Telegram? Повідомлення матимуть позначку ТЕСТ.'))return;
+      await api('mono/settings',{version:data.settings.version,enabled:!data.settings.notifications_enabled});await load();
+    })),button('Надіслати заплановані тести',()=>saving(async()=>{await api('mono/retry',{});await load();})));
+    card.append(actions,el('p','Оновлення — не частіше разу на хвилину. Telegram за замовчуванням вимкнений для цього модуля.','muted'));
+    const states={unverified:'Не перевірено',verified:'Перевірено · тест',held:'Утримання коштів',mismatch:'Розбіжність із webhook',not_found:'Не знайдено у цьому періоді',excluded:'Не є гривневим надходженням'};
+    const timestamp=value=>value?new Date(value*1000).toLocaleString('uk-UA'):'Немає підтвердженого часу';
+    const rows=data.transactions.map(t=>{
+      const matching=el('div');matching.append(el('span',t.candidates.length?`Можливих збігів: ${t.candidates.length}${t.moreCandidates?'+':''}`:'Збігів немає'));
+      if(t.candidates.length)matching.append(button('Переглянути збіги',()=>{
+        openEditor('Можливі збіги · тест');$('editorBody').append(el('p','Це синтетичні записи для навчання. Вони не є замовленнями покупців. Зарахування на особистий рахунок не доводить оплату конкретного замовлення.','hint'),
+          table(['Номер','Сума','Статус'],t.candidates.map(o=>[o.id,money(o.amount_kop),labels[o.status] || o.status])));
+      }));
+      const amount=t.currencyCode===980?money(t.amountKop):(t.amountKop/100).toFixed(2)+' · код '+t.currencyCode;
+      return[t.id.slice(0,8),timestamp(t.time),amount,badge(t.verificationState,states),matching];
+    });
+    const notifications=data.notifications.map(e=>{
+      const control=el('span');if(['retry','failed','uncertain'].includes(e.state))control.append(button('Повторити',()=>saving(async()=>{
+        let allowDuplicateRisk=false;if(e.state==='uncertain'){allowDuplicateRisk=confirm('Спочатку перевірте Telegram. Повтор може створити дубль. Продовжити?');if(!allowDuplicateRisk)return;}
+        await api('mono/retry',{eventId:e.id,allowDuplicateRisk});await load();
+      })));return[e.transaction_ref.slice(0,8),badge(e.state,eventLabels),e.attempts,e.last_error || '—',control];
+    });
+    return[card,el('h2','Тестові транзакції'),table(['Запис','Час','Сума','Перевірка','Замовлення'],rows),
+      el('h2','Telegram про надходження'),table(['Запис','Стан','Спроб','Результат',''],notifications),
+      el('h2','Останні перевірки'),table(['Час','Стан','Результат'],data.runs.map(r=>[timestamp(r.started_at),r.state,r.error_code || '—'])),
+      el('h2','Історія налаштувань'),table(['Час','Адміністратор','Дія'],data.actions.map(a=>[date(a.created_at),a.actor,a.action]))];
+  }
   async function load() {
     const id=++loadId;content.setAttribute('aria-busy','true');
-    try{const nodes=await ({dashboard,products,orders,audit,telegram}[view])();if(id===loadId)content.replaceChildren(...nodes);}catch(error){notice(error.message,true);}finally{if(id===loadId)content.setAttribute('aria-busy','false');}
+    try{const nodes=await ({dashboard,products,orders,audit,telegram,support,mono}[view])();if(id===loadId)content.replaceChildren(...nodes);}catch(error){notice(error.message,true);}finally{if(id===loadId)content.setAttribute('aria-busy','false');}
   }
-  document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>{view=b.dataset.view;offset=0;$('notice').hidden=true;document.querySelectorAll('[data-view]').forEach(x=>x.removeAttribute('aria-current'));b.setAttribute('aria-current','page');$('pageTitle').textContent={dashboard:'Огляд магазину',products:'Товари та наявність',orders:'Замовлення',audit:'Історія змін',telegram:'Telegram-сповіщення'}[view];load();}));
+  document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>{view=b.dataset.view;offset=0;$('notice').hidden=true;document.querySelectorAll('[data-view]').forEach(x=>x.removeAttribute('aria-current'));b.setAttribute('aria-current','page');$('pageTitle').textContent={dashboard:'Огляд магазину',products:'Товари та наявність',orders:'Замовлення',support:'Підтримка покупців',audit:'Історія змін',telegram:'Telegram-сповіщення',mono:'Моніторинг надходжень'}[view];load();}));
   $('closeEditor').addEventListener('click',()=>{if(!busy)dialog.close();});dialog.addEventListener('cancel',e=>{if(busy)e.preventDefault();});
   api('session').then(data=>{csrf=data.csrfToken;$('identity').textContent=data.email;return load();}).catch(error=>{content.replaceChildren(el('p','Доступ закрито до налаштування Cloudflare Access.'));content.setAttribute('aria-busy','false');notice(error.message,true);});
 })();

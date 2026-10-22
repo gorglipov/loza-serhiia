@@ -1,5 +1,6 @@
 const encoder = new TextEncoder();
-export const MAX_QUANTITY = 5;
+export const MAX_QUANTITY = 20;
+export const MAX_ORDER_QUANTITY = 100;
 export const DELIVERY_METHODS = [
   { id: "nova_poshta", name: "Нова пошта" },
   { id: "ukrposhta", name: "Укрпошта" },
@@ -52,7 +53,7 @@ export function db(context) {
 }
 
 export async function requireSchema(database) {
-  const row = await database.prepare("SELECT version FROM loza_store_migrations WHERE version = ?").bind("0005_manual_availability").first();
+  const row = await database.prepare("SELECT version FROM loza_store_migrations WHERE version = ?").bind("0008_manual_catalog_support").first();
   if (!row) throw new StoreError("STORE_UNAVAILABLE", "Магазин тимчасово недоступний. Спробуйте пізніше.", 503);
 }
 
@@ -87,11 +88,12 @@ export function normalizeItems(input) {
   const items = input.map(item => {
     if (!item || typeof item.productId !== "string" || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(item.productId) ||
       !Number.isInteger(item.quantity) || item.quantity < 1 || item.quantity > MAX_QUANTITY || seen.has(item.productId)) {
-      throw new StoreError("INVALID_ITEMS", "Перевірте товари та кількість: від 1 до 5 штук кожного.");
+      throw new StoreError("INVALID_ITEMS", "Перевірте товари та кількість: від 1 до 20 лоз кожного сорту.");
     }
     seen.add(item.productId);
     return { productId: item.productId, quantity: item.quantity };
   });
+  if(items.reduce((sum,item)=>sum+item.quantity,0)>MAX_ORDER_QUANTITY)throw new StoreError('INVALID_ITEMS','В одному замовленні допускається до 100 лоз. Для більшої кількості зверніться в підтримку.');
   return items.sort((a, b) => a.productId.localeCompare(b.productId, "en"));
 }
 
@@ -153,7 +155,7 @@ export async function rateLimit(context, database, scope, limit) {
   if (row.hits > limit) throw new StoreError("RATE_LIMITED", "Забагато запитів. Зачекайте трохи та повторіть спробу.", 429, 60 - (now - window));
 }
 
-export async function verifyTurnstile(context, token) {
+export async function verifyTurnstile(context, token, action = 'loza_checkout') {
   if (!configured(context.env)) throw new StoreError("CHECKOUT_UNAVAILABLE", "Оформлення тимчасово недоступне. Спробуйте пізніше.", 503);
   if (typeof token !== "string" || !token || token.length > 2048) throw new StoreError("TURNSTILE_REQUIRED", "Пройдіть перевірку перед надсиланням.");
   let result;
@@ -167,14 +169,14 @@ export async function verifyTurnstile(context, token) {
     if (!response.ok) throw new Error("Verification unavailable");
     result = await response.json();
   } catch { throw new StoreError("TURNSTILE_UNAVAILABLE", "Перевірка тимчасово недоступна. Спробуйте ще раз.", 503); }
-  if (result.success !== true || result.action !== "loza_checkout" || result.hostname !== new URL(context.request.url).hostname) {
+  if (result.success !== true || result.action !== action || result.hostname !== new URL(context.request.url).hostname) {
     throw new StoreError("TURNSTILE_INVALID", "Повторіть перевірку та надішліть форму ще раз.");
   }
 }
 
 export async function quote(database, items) {
   // Placeholders depend only on a bounded item count, never on user text.
-  const rows = await database.prepare(`SELECT p.id, p.name, p.price_kop, p.available, p.stock, p.is_demo,
+  const rows = await database.prepare(`SELECT p.id, p.name, p.price_kop, p.available, p.is_demo,
     c.confirmed_price_kop,a.in_stock FROM products p LEFT JOIN product_catalog c ON c.product_id=p.id
     LEFT JOIN product_availability a ON a.product_id=p.id
     WHERE p.id IN (${items.map(() => "?").join(",")})`).bind(...items.map(item => item.productId)).all();
@@ -184,7 +186,7 @@ export async function quote(database, items) {
     if (!product || product.is_demo || !product.in_stock || !Number.isSafeInteger(product.price_kop) || product.price_kop < 1 || product.confirmed_price_kop !== product.price_kop) {
       throw new StoreError("STOCK_UNAVAILABLE", "Наявність або ціна товару змінилася. Оновіть кошик.", 409);
     }
-    return { productId: product.id, name: product.name, quantity: item.quantity, unitPriceKop: product.price_kop, lineTotalKop: product.price_kop * item.quantity, stock: product.stock, isDemo: Boolean(product.is_demo) };
+    return { productId: product.id, name: product.name, quantity: item.quantity, unitPriceKop: product.price_kop, lineTotalKop: product.price_kop * item.quantity, isDemo: Boolean(product.is_demo) };
   });
   return { lines, amountKop: lines.reduce((sum, line) => sum + line.lineTotalKop, 0), currency: "UAH", paymentsEnabled: false, demoOnly: lines.every(line => line.isDemo) };
 }

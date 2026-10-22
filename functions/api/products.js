@@ -1,9 +1,9 @@
-import { db, endpoint, json, requireSchema } from "../../server/checkout.js";
+import { db, endpoint, json, requireSchema, MAX_QUANTITY } from "../../server/checkout.js";
 
 export const onRequest = context => endpoint(context, "GET", async context => {
   const database = db(context);
   await requireSchema(database);
-  const result = await database.prepare(`SELECT p.id, p.name, p.price_kop, p.available, p.stock, p.is_demo, p.details_json,
+  const result = await database.prepare(`SELECT p.id, p.name, p.price_kop, p.available, p.is_demo, p.details_json,
     c.confirmed_price_kop, c.characteristics_confirmed,a.in_stock
     FROM products p JOIN product_catalog c ON c.product_id=p.id JOIN product_availability a ON a.product_id=p.id
     WHERE p.is_demo=0 ORDER BY p.name COLLATE NOCASE`).all();
@@ -12,7 +12,7 @@ export const onRequest = context => endpoint(context, "GET", async context => {
     priceConfirmed: row.price_kop !== null && row.confirmed_price_kop === row.price_kop,
     characteristicsConfirmed: Boolean(row.characteristics_confirmed),
     inStock: Boolean(row.in_stock),
-    available: Boolean(row.in_stock && row.price_kop !== null && row.confirmed_price_kop === row.price_kop), stock: row.in_stock?20:0,
+    available: Boolean(row.in_stock && row.price_kop !== null && row.confirmed_price_kop === row.price_kop),
     isDemo: Boolean(row.is_demo), details: JSON.parse(row.details_json),
-  })), maxQuantity: 5, paymentsEnabled: false });
+  })), maxQuantity: MAX_QUANTITY, paymentsEnabled: false });
 });
