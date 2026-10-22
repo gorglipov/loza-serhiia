@@ -7,11 +7,16 @@ export function queueOrder(database,id) {
 }
 async function message(database,event) {
   if(event.kind==='test') return '✅ Тестове повідомлення LOZA\nTelegram-сповіщення підключено. Персональні дані покупців не надсилаються.';
-  const order=await database.prepare('SELECT id,amount_kop,status FROM orders WHERE id=?').bind(event.order_id).first();
+  const order=await database.prepare('SELECT o.id,o.amount_kop,o.status,c.comment FROM orders o LEFT JOIN order_checkout c ON c.order_id=o.id WHERE o.id=?').bind(event.order_id).first();
   const items=await database.prepare('SELECT product_name,quantity FROM order_items WHERE order_id=? ORDER BY product_id').bind(event.order_id).all();
   if(!order || !items.results.length) throw new Error('ORDER_DATA_UNAVAILABLE');
+  const payment=/^\[LOZA_PAYMENT:(full|deposit_cod)\] /.exec(order.comment||'')?.[1];
+  const paymentLines=payment==='deposit_cod' && order.amount_kop>=10000
+    ? ['Умови: передоплата 100 грн + післяплата '+((order.amount_kop-10000)/100).toFixed(2)+' грн']
+    : payment==='full' ? ['Умови: повна передоплата '+(order.amount_kop/100).toFixed(2)+' грн'] : [];
   return ['🛒 Нове замовлення LOZA','Номер: #'+order.id,'Товари:',...items.results.map(i=>i.product_name+' × '+i.quantity),
-    'Сума: '+(order.amount_kop/100).toFixed(2)+' грн','Статус: '+(STATUS_LABELS[order.status] || 'Оновлено')].join('\n').slice(0,4096);
+    'Сума: '+(order.amount_kop/100).toFixed(2)+' грн',...paymentLines,
+    'Оплата: не перевірена','Статус: '+(STATUS_LABELS[order.status] || 'Оновлено')].join('\n').slice(0,4096);
 }
 export async function deliverPending(database,env,limit=5) {
   if(!telegramConfigured(env)) return {configured:false};
