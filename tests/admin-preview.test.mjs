@@ -549,7 +549,17 @@ test('payment confirmation dialog cancellation has no effect; explicit acceptanc
   try{
     const page=await browser.newPage({viewport:{width:390,height:900},extraHTTPHeaders:{'Cf-Access-Jwt-Assertion':token}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
     await page.goto((await mf.ready).origin+'/admin');await page.getByRole('heading',{name:'Замовлення за статусами'}).waitFor();await page.getByRole('button',{name:'Замовлення',exact:true}).click();
-    await page.getByRole('row').filter({hasText:id}).getByRole('button',{name:'Деталі'}).click();
+    const stored=await db.prepare('SELECT created_at FROM order_checkout WHERE order_id=?').bind(id).first();
+    const expectedKyiv=formatKyivTimestamp(stored.created_at);
+    assert.ok(expectedKyiv);
+    assert.ok(await page.getByRole('columnheader',{name:'Дата й час (Київ)'}).isVisible());
+    const orderRow=page.getByRole('row').filter({hasText:id});
+    const rowText=await orderRow.innerText();
+    assert.ok(rowText.includes(expectedKyiv.split(', ')[0]));
+    assert.ok(rowText.includes(expectedKyiv.split(', ')[1]));
+    assert.ok(rowText.includes('за Києвом'));
+    await orderRow.getByRole('button',{name:'Деталі'}).click();
+    assert.ok((await page.getByRole('dialog').innerText()).includes(expectedKyiv+' (Київ)'));
     page.setDefaultTimeout(8000);
     const select=page.getByLabel('Статус оплати',{exact:true});await select.selectOption('confirmed');
     page.once('dialog',d=>d.dismiss());await page.getByRole('button',{name:'Зберегти статус оплати'}).click();
