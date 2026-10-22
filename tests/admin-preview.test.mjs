@@ -400,3 +400,21 @@ test('mobile admin has a live availability switch and no quantity field',{skip:!
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);assert.deepEqual(errors,[]);
   }finally{await browser.close();}
 });
+
+test('every one of the 107 real varieties can be switched both ways through the protected API without confirming prices',async()=>{
+  const products=(await json('/api/admin/products')).data.products;
+  assert.equal(products.length,107);assert.equal(new Set(products.map(p=>p.id)).size,107);
+  for(const original of products){
+    // Reset only the isolated test bucket; the separate rate-limit test still enforces 30 writes/minute.
+    await db.prepare('DELETE FROM checkout_rate_limits').run();
+    for(const inStock of [!original.inStock,original.inStock]){
+      const current=await adminProduct(original.id),key=crypto.randomUUID();
+      const response=await json('/api/admin/products/'+original.id+'/availability',{data:{version:current.version,inStock},key});
+      assert.equal(response.status,200,original.id);
+      const saved=await adminProduct(original.id);assert.equal(saved.inStock,inStock,original.id);
+      assert.equal(saved.stock,inStock?20:0);assert.equal(saved.price_kop,original.price_kop);
+      assert.equal(saved.confirmed_price_kop,original.confirmed_price_kop);assert.deepEqual(saved.details,original.details);
+      assert.equal((await db.prepare('SELECT COUNT(*) n FROM admin_audit_log WHERE mutation_id=?').bind(key).first()).n,1);
+    }
+  }
+});

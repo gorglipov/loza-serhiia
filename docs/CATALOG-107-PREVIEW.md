@@ -93,7 +93,8 @@ JSON та UUID у `Idempotency-Key`. Оптимістична версія за�
 1. `migrations/0004_catalog_107.sql` — каталог/ціни/джерело/CSV.
 2. `migrations/0005_manual_availability.sql` — ручна наявність без списання.
 
-0004 уже застосована до Preview; до нього потрібна лише 0005. Не запускайте
+0004 і 0005 вже застосовані до Preview. Повторно їх запускати для публікації
+цієї гілки не потрібно. Не запускайте
 старі міграції після 0005: для повторного виконання використовуйте тільки 0005.
 Вона не скидає налаштовані ручні прапорці, ціни або підтвердження.
 
@@ -133,7 +134,7 @@ PRAGMA foreign_key_check; -- жодних порушень
 
 ```powershell
 npx.cmd wrangler pages functions build --outfile .wrangler/admin-worker.js
-node --test tests/access-configuration.test.mjs tests/admin-preview.test.mjs tests/catalog-csv.test.mjs tests/source-secrets.test.mjs tests/telegram-retry.test.mjs
+node --test tests/access-configuration.test.mjs tests/admin-preview.test.mjs tests/catalog-csv.test.mjs tests/production-migrations.test.mjs tests/source-secrets.test.mjs tests/telegram-retry.test.mjs
 ```
 
 Miniflare/Playwright можна підключити через `LOZA_MINIFLARE_MODULE` та
@@ -145,3 +146,7 @@ DDL без рядків покупців, підписаний тестовий 
 від ціни; відсутність поля кількості; швидкий перемикач, CSRF/JWT, журнал,
 повтори/конфлікти; замовлення сумарно понад 20 штук без списання; скасування без
 повернень; повторна перевірка вже заповненого кошика та SQL-гонка з відкатом.
+
+Перевірку готовності PR №4 до Production, результати 37 тестів, порядок
+міграцій 0004 → 0005 перед Merge та зауваження щодо Telegram Cron дивіться в
+[PR4-PRODUCTION-READINESS.md](PR4-PRODUCTION-READINESS.md).
