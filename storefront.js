@@ -31,7 +31,7 @@
   };
   let cart = readCart(), products = [], config = null, quoted = null, quoteLoading = false;
   let quoteRevision = 0, quoteTimer, quoteController, pending = null, pendingPayload = null;
-  let inFlight = false, recovering = false, receiptShown = false, token = "", widgetId = null, turnstileLoading = null;
+  let inFlight = false, recovering = false, receiptShown = false, token = "", widgetId = null;
   let returnFocus = null, catalogLoaded = false;
 
   const makeKey = () => {

@@ -176,7 +176,7 @@ export async function verifyTurnstile(context, token, action = 'loza_checkout') 
 
 export async function quote(database, items) {
   // Placeholders depend only on a bounded item count, never on user text.
-  const rows = await database.prepare(`SELECT p.id, p.name, p.price_kop, p.available, p.stock, p.is_demo,
+  const rows = await database.prepare(`SELECT p.id, p.name, p.price_kop, p.available, p.is_demo,
     c.confirmed_price_kop,a.in_stock FROM products p LEFT JOIN product_catalog c ON c.product_id=p.id
     LEFT JOIN product_availability a ON a.product_id=p.id
     WHERE p.id IN (${items.map(() => "?").join(",")})`).bind(...items.map(item => item.productId)).all();

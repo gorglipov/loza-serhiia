@@ -49,7 +49,7 @@ before(async()=>{
     }},outboundService:async request=>{
       const url=new URL(request.url);
       if(url.href===issuer+'/cdn-cgi/access/certs')return Response.json({keys:[jwk]});
-      if(url.hostname==='challenges.cloudflare.com'){const input=await request.json();return Response.json({success:true,action:input.response==='support-fixture'?'loza_support':'loza_checkout',hostname:new URL(origin).hostname});}
+      if(url.hostname==='challenges.cloudflare.com'){const input=await request.json();return Response.json({success:true,action:input.response.startsWith('support-')?'loza_support':'loza_checkout',hostname:input.response==='support-ui-fixture'?new URL((await mf.ready).origin).hostname:new URL(origin).hostname});}
       if(url.hostname==='api.telegram.org'){
         calls++;const payload=await request.json();sent.push(payload);
         if(telegramMode==='429')return Response.json({ok:false,error_code:429,parameters:{retry_after:1}},{status:429});
@@ -76,7 +76,7 @@ before(async()=>{
   await db.prepare("INSERT INTO orders(id,amount_kop,status) VALUES('LEGACY-CANCELLED',10000,'cancelled')").run();
   await db.prepare("INSERT INTO admin_stock_returns(order_id) VALUES('LEGACY-CANCELLED')").run();
   await apply('migrations/0005_manual_availability.sql');await apply('migrations/0005_manual_availability.sql');
-  await apply('migrations/0007_stock_inventory.sql');await apply('migrations/0008_manual_catalog_support.sql');await apply('migrations/0008_manual_catalog_support.sql');
+  await apply('migrations/0006_mono_monitor.sql');await apply('migrations/0006_mono_monitor.sql');await apply('migrations/0007_stock_inventory.sql');await apply('migrations/0008_manual_catalog_support.sql');await apply('migrations/0008_manual_catalog_support.sql');
   token=await jwt();const session=await json('/api/admin/session');assert.equal(session.status,200);csrf=session.data.csrfToken;
 });
 after(async()=>{if(mf)await mf.dispose();});
@@ -477,7 +477,7 @@ test('Telegram support failures preserve tickets; confirmed rejection retries, u
 test('mobile support form accepts a contact and reason; protected admin renders message text safely',{skip:!process.env.LOZA_PLAYWRIGHT_MODULE},async()=>{
   const {chromium}=await import(pathToFileURL(process.env.LOZA_PLAYWRIGHT_MODULE).href),browser=await chromium.launch({channel:'msedge',headless:true});
   try{
-    const page=await browser.newPage({viewport:{width:390,height:900}});await page.addInitScript(()=>{window.turnstile={render(selector,options){document.querySelector(selector).textContent='Локальна тестова перевірка';options.callback('support-fixture');return 'fixture-widget';},remove(){},reset(){}};});
+    const page=await browser.newPage({viewport:{width:390,height:900}});await page.addInitScript(()=>{window.turnstile={render(selector,options){document.querySelector(selector).textContent='Локальна тестова перевірка';options.callback('support-ui-fixture');return 'fixture-widget';},remove(){},reset(){}};});
     await page.goto((await mf.ready).origin+'/');await page.getByRole('button',{name:'Написати в підтримку',exact:true}).first().click();await page.getByLabel('Причина звернення *',{exact:false}).selectOption('technical');
     assert.equal(await page.getByRole('button',{name:'Надіслати звернення',exact:true}).isEnabled(),true);
     await page.getByLabel('Контакт для відповіді *',{exact:true}).fill('@fixture_ui_support');await page.getByLabel('Що сталося? *',{exact:true}).fill('<img src=x onerror="window.__supportXss=1"> Fixture support message.');
@@ -487,4 +487,81 @@ test('mobile support form accepts a contact and reason; protected admin renders 
     assert.equal(await adminPage.locator('#editor img').count(),0);assert.equal(await adminPage.evaluate(()=>window.__supportXss),undefined);await adminPage.getByText('Fixture support message.',{exact:false}).waitFor();assert.equal(await adminPage.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
     await page.screenshot({path:new URL('.wrangler/support-mobile.png',root).pathname.slice(process.platform==='win32'?1:0),fullPage:false});
   }finally{await browser.close();}
+});
+
+test('monitoring and retired API probe require Access, CSRF and same-origin; Production and live mode stay disabled',async()=>{
+  for(const path of ['mono','mono/sync','mono/settings','mono/retry']){
+    assert.equal((await json('/api/admin/'+path,{auth:null})).status,403);
+    if(path==='mono')continue;
+    for(const options of [{auth:null},{csrfToken:''},{headers:{Origin:'https://evil.test'}}])assert.equal((await json('/api/admin/'+path,{data:{},...options})).status,403);
+  }
+  const probe=await json('/api/mono/api-check',{auth:null,data:{},headers:{'X-Admin-Key':'fixture-webhook-key'}});assert.equal(probe.status,403);
+  assert.equal((await json('/api/mono/api-check',{data:{}})).status,409);
+  const status=await json('/api/admin/mono');assert.equal(status.status,200);assert.equal(status.data.mode,'fixture');assert.equal(status.data.liveEnabled,false);assert.equal(status.data.paymentsEnabled,false);assert.equal(status.data.settings.notifications_enabled,0);
+  const {fixturePreview}=await import('../server/mono-monitor.js');assert.equal(fixturePreview(new Request('https://loza-serhiia.pages.dev/admin')),false);assert.equal(fixturePreview(new Request('https://shop.example.com/admin')),false);
+  assert.equal(fixturePreview(new Request('https://abcdef12.loza-serhiia.pages.dev/admin')),false);
+  assert.equal(fixturePreview(new Request('https://codex-mono-monitor-preview.loza-serhiia.pages.dev/admin')),true);
+  assert.equal(fixturePreview(new Request('https://codex-stock-20-preview.loza-serhiia.pages.dev/admin')),true);
+  const productionOrigin='https://loza-serhiia.pages.dev';
+  const productionSession=await mf.dispatchFetch(productionOrigin+'/api/admin/session',{headers:{'Cf-Access-Jwt-Assertion':token}}),productionCsrf=(await productionSession.json()).csrfToken;
+  const production=await mf.dispatchFetch(productionOrigin+'/api/admin/mono/sync',{method:'POST',headers:{'Cf-Access-Jwt-Assertion':token,Origin:productionOrigin,'Content-Type':'application/json','X-CSRF-Token':productionCsrf,'Idempotency-Key':crypto.randomUUID()},body:'{}'});
+  assert.equal(production.status,403);assert.equal((await production.json()).code,'MONO_LIVE_DISABLED');
+});
+
+test('fixture statement verifies only two credits, deduplicates concurrent sync and never changes orders or legacy bank events',async()=>{
+  const snapshot=async()=>({orders:(await db.prepare('SELECT * FROM orders ORDER BY id').all()).results,events:(await db.prepare('SELECT * FROM mono_events ORDER BY transaction_id').all()).results,
+    items:(await db.prepare('SELECT * FROM order_items ORDER BY order_id,product_id').all()).results});
+  const before=await snapshot(),key=crypto.randomUUID();
+  const results=await Promise.all([json('/api/admin/mono/sync',{data:{},key}),json('/api/admin/mono/sync',{data:{},key})]);
+  assert.ok(results.every(r=>r.status===200));assert.deepEqual(await snapshot(),before);
+  const status=await json('/api/admin/mono');assert.equal(status.data.transactions.length,7);assert.equal(status.data.notifications.length,2);
+  const states=status.data.transactions.map(t=>t.verificationState);assert.equal(states.filter(x=>x==='verified').length,2);assert.ok(states.includes('held'));assert.ok(states.includes('mismatch'));assert.ok(states.includes('not_found'));
+  const ambiguous=status.data.transactions.find(t=>t.amountKop===50000);assert.equal(ambiguous.candidates.length,2);assert.equal(ambiguous.verifiedByBank,false);
+  for(const t of status.data.transactions)if(t.verificationState!=='verified')assert.equal(t.candidates.length,0);
+  assert.equal(status.data.transactions.find(t=>t.amountKop===999000).verificationState,'not_found');
+  const serialized=JSON.stringify(status.data);for(const hidden of ['fixture-account','fixture-incoming-500','PRIVATE_FIXTURE_IBAN','Private fixture description','<script>bad','fixture-personal-token'])assert.ok(!serialized.includes(hidden));
+  const replay=await json('/api/admin/mono/sync',{data:{},key});assert.equal(replay.status,200);assert.equal(replay.data.replayed,true);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM mono_monitor_runs WHERE id=?').bind(key).first()).n,1);
+});
+test('one-minute synchronization gate rejects new requests and client-supplied bank parameters are forbidden',async()=>{
+  assert.equal((await json('/api/admin/mono/sync',{data:{}})).status,429);
+  assert.equal((await json('/api/admin/mono/sync',{data:{account:'attacker-account',token:'not-a-token',mode:'live'}})).status,400);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM mono_monitor_transactions').first()).n,7);
+});
+test('monitor notification settings are versioned, audited and replay safe; bank messages contain no account details',async()=>{
+  const key=crypto.randomUUID(),input={version:0,enabled:true};
+  assert.equal((await json('/api/admin/mono/settings',{data:input,key})).status,200);
+  assert.equal((await json('/api/admin/mono/settings',{data:input,key})).status,200);
+  assert.equal((await json('/api/admin/mono/settings',{data:{version:0,enabled:false}})).status,409);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM mono_monitor_actions WHERE id=?').bind(key).first()).n,1);
+  telegramMode='ok';const before=calls;
+  assert.equal((await json('/api/admin/mono/retry',{data:{}})).status,200);assert.equal(calls,before+2);
+  assert.equal((await json('/api/admin/mono/retry',{data:{}})).status,200);assert.equal(calls,before+2);
+  const texts=sent.slice(-2).map(p=>p.text);assert.ok(texts.every(t=>t.includes('ТЕСТ LOZA') && t.includes('Статус замовлення не змінено')));
+  for(const text of texts)for(const secret of ['fixture-account','fixture-incoming','PRIVATE_FIXTURE_IBAN','Preview Buyer','380991234567',env.TELEGRAM_BOT_TOKEN])assert.ok(!text.includes(secret));
+});
+test('monitor retries confirmed Telegram errors and never automatically resends uncertain deliveries',async()=>{
+  const event=(await db.prepare('SELECT id FROM mono_monitor_notifications LIMIT 1').first()).id;
+  // Simulate a new unsent event in this isolated fixture, without contacting any real service.
+  await db.prepare("UPDATE mono_monitor_notifications SET state='queued',attempts=0,next_attempt=0 WHERE id=?").bind(event).run();
+  telegramMode='429';assert.equal((await json('/api/admin/mono/retry',{data:{}})).status,200);
+  let row=await db.prepare('SELECT state,attempts,next_attempt FROM mono_monitor_notifications WHERE id=?').bind(event).first();assert.equal(row.state,'retry');assert.equal(row.attempts,1);assert.ok(row.next_attempt>Math.floor(Date.now()/1000));
+  await db.prepare('UPDATE mono_monitor_notifications SET next_attempt=0 WHERE id=?').bind(event).run();telegramMode='uncertain';
+  assert.equal((await json('/api/admin/mono/retry',{data:{}})).status,200);assert.equal((await db.prepare('SELECT state FROM mono_monitor_notifications WHERE id=?').bind(event).first()).state,'uncertain');
+  const before=calls;await json('/api/admin/mono/retry',{data:{}});assert.equal(calls,before);
+  assert.equal((await json('/api/admin/mono/retry',{data:{eventId:event,allowDuplicateRisk:false}})).status,409);
+  telegramMode='ok';assert.equal((await json('/api/admin/mono/retry',{data:{eventId:event,allowDuplicateRisk:true}})).status,200);
+  assert.equal((await db.prepare('SELECT state FROM mono_monitor_notifications WHERE id=?').bind(event).first()).state,'sent');
+});
+test('private monitor works on phones and desktop without exposing bank identifiers',{skip:!process.env.LOZA_PLAYWRIGHT_MODULE},async()=>{
+  const {chromium}=await import(pathToFileURL(process.env.LOZA_PLAYWRIGHT_MODULE).href),browser=await chromium.launch({channel:'msedge',headless:true});
+  try{for(const width of [390,1440]){
+    const page=await browser.newPage({viewport:{width,height:900},extraHTTPHeaders:{'Cf-Access-Jwt-Assertion':token}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
+    await page.goto((await mf.ready).origin+'/admin');await page.getByRole('heading',{name:'Замовлення за статусами'}).waitFor();
+    await page.getByRole('button',{name:'Надходження',exact:true}).click();await page.getByRole('heading',{name:'Тестові транзакції',exact:true}).waitFor();
+    assert.ok((await page.locator('#content').innerText()).includes('Розбіжність із webhook'));
+    await page.getByRole('button',{name:'Переглянути збіги',exact:true}).first().click();await page.getByRole('dialog').waitFor();
+    assert.ok((await page.getByRole('dialog').innerText()).includes('MONO-DEMO-'));assert.equal(await page.getByRole('button',{name:'Позначити оплаченим',exact:true}).count(),0);
+    await page.getByRole('button',{name:'Закрити',exact:true}).click();assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);assert.deepEqual(errors,[]);await page.close();
+  }}finally{await browser.close();}
 });

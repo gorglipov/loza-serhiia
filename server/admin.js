@@ -3,6 +3,7 @@ import {issueCsrf} from './access.js';
 import {deliverPending,telegramConfigured,STATUS_LABELS} from './telegram.js';
 import {catalogApi} from './catalog.js';
 import {supportAdminApi} from './support.js';
+import {monoMonitorApi} from './mono-monitor.js';
 const invalid=()=>new StoreError('INVALID_ADMIN_INPUT','Перевірте введені значення.');
 const int=(v,max=100000000)=>Number.isSafeInteger(v) && v>=0 && v<=max;
 const clean=(v,min,max)=> {
@@ -73,6 +74,7 @@ export async function adminApi(context) {
     await rateLimit(context,database,'admin',method==='GET'?180:30);
     const url=new URL(context.request.url), route=url.pathname.replace(/^\/api\/admin\/?/,'').replace(/\/$/,'');
     const actor=context.data.admin.email;
+    if(route==='mono' || route.startsWith('mono/'))return monoMonitorApi(context,database,route,actor,commandId);
     if(route==='support' || route.startsWith('support/'))return supportAdminApi(context,database,route,actor,commandId);
     if(route.startsWith('catalog/')) return catalogApi(context,database,route,actor,productInput,commandId);
     if(method==='GET' && route==='session') return json({success:true,email:actor,csrfToken:await issueCsrf(context.request,context.env,context.data.admin),statuses:STATUS_LABELS});
