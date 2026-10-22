@@ -2,7 +2,7 @@
   "use strict";
   const $ = selector => document.querySelector(selector);
   const money = new Intl.NumberFormat("uk-UA", { style: "currency", currency: "UAH" });
-  const price = kop => Number.isSafeInteger(kop) ? money.format(kop / 100) : "Немає в наявності";
+  const price = kop => Number.isSafeInteger(kop) ? money.format(kop / 100) : "Ціну уточнюйте";
   const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
   const CART_KEY = "loza-cart-v2", PENDING_KEY = "loza-checkout-pending-v2";
   const timeoutSignal = milliseconds => {
@@ -110,7 +110,7 @@
     $("#catalogSize").textContent = String(products.length);
     $("#grid").innerHTML = shown.length ? shown.map(product => {
       const d = product.details || {}, quantity = quantityOf(product.id);
-      const available = product.available && product.priceConfirmed && product.stock > 0;
+      const available = product.inStock && product.available && product.priceConfirmed;
       return `<article class="card catalog-card is-visible${available ? "" : " unavailable"}" data-product-id="${esc(product.id)}">
         <div class="cardhead"><span class="tag">${esc(d.ripening || "Потребує перевірки")}</span>${d.kishmish ? '<span class="kishmish-badge">Кишмиш</span>' : ""}</div>
         <h3 class="title">${esc(product.name)}</h3>
@@ -118,9 +118,9 @@
         <p class="catalog-review">${product.characteristicsConfirmed ? "Характеристики підтверджено власником" : "Характеристики з каталогу · потребують перевірки"}</p>
         <div class="catalog-price"><strong class="price">${esc(price(product.priceKop))}</strong>${product.priceKop !== null ? '<span>за лозу</span>' : ""}</div>
         ${product.priceKop !== null && !product.priceConfirmed ? '<p class="catalog-price-note">Ціна з PDF · очікує підтвердження</p>' : ""}
-        ${product.priceKop !== null ? `<p class="store-stock${available ? "" : " store-unavailable"}">${available ? `У наявності: ${product.stock} шт.` : "Немає в наявності"}</p>` : ""}
-        ${quantity ? `<div class="quantity-control"><button type="button" data-action="decrease" data-id="${esc(product.id)}" aria-label="Зменшити кількість ${esc(product.name)}" ${pending ? "disabled" : ""}>−</button><span><strong>${quantity}</strong><small>у кошику</small></span><button type="button" data-action="increase" data-id="${esc(product.id)}" aria-label="Збільшити кількість ${esc(product.name)}" ${pending || !available || quantity >= Math.min(5, product.stock) ? "disabled" : ""}>+</button></div>` :
-          `<button class="add" type="button" data-action="increase" data-id="${esc(product.id)}" ${pending || !available ? "disabled" : ""}>${available ? "Додати до кошика" : product.priceKop === null ? "Замовлення недоступне" : !product.priceConfirmed ? "Ціна очікує підтвердження" : "Немає в наявності"}</button>`}
+        <p class="store-stock${product.inStock ? "" : " store-unavailable"}">${product.inStock ? "В наявності" : "Немає в наявності"}</p>
+        ${quantity ? `<div class="quantity-control"><button type="button" data-action="decrease" data-id="${esc(product.id)}" aria-label="Зменшити кількість ${esc(product.name)}" ${pending ? "disabled" : ""}>−</button><span><strong>${quantity}</strong><small>у кошику</small></span><button type="button" data-action="increase" data-id="${esc(product.id)}" aria-label="Збільшити кількість ${esc(product.name)}" ${pending || !available || quantity >= 5 ? "disabled" : ""}>+</button></div>` :
+          `<button class="add" type="button" data-action="increase" data-id="${esc(product.id)}" ${pending || !available ? "disabled" : ""}>${available ? "Додати до кошика" : product.priceKop === null ? "Замовлення недоступне" : !product.inStock ? "Замовлення недоступне" : !product.priceConfirmed ? "Ціна очікує підтвердження" : "Замовлення недоступне"}</button>`}
       </article>`;
     }).join("") : '<p class="store-load">За цими умовами товарів не знайдено.</p>';
     $("#varietySuggestions").innerHTML = query ? products.filter(product => product.name.toLocaleLowerCase("uk").startsWith(query)).slice(0, 10).map(product => `<option value="${esc(product.name)}"></option>`).join("") : "";
@@ -147,13 +147,13 @@
     const byId = new Map((quoted?.lines || []).map(line => [line.productId, line]));
     $("#cartLines").innerHTML = cart.length ? cart.map(item => {
       const product = findProduct(item.productId), line = byId.get(item.productId);
-      const unavailable = !product?.available || product.stock < item.quantity;
+      const unavailable = !product?.inStock || !product?.available || !product?.priceConfirmed;
       return `<div class="cartrow"><div><strong>${esc(product?.name || "Товар тимчасово недоступний")}</strong>
         <div class="hint">${esc(price(product?.priceKop))} за штуку</div>
-        ${unavailable ? '<div class="store-stock store-unavailable">Перевірте наявність або зменште кількість.</div>' : ""}
+        ${unavailable ? '<div class="store-stock store-unavailable">Наявність або ціна змінилася. Оновіть кошик.</div>' : ""}
         <div class="store-line-total">${line ? esc(price(line.lineTotalKop)) : quoteLoading ? "Розраховуємо…" : "—"}</div>
         <button class="remove" type="button" data-action="remove" data-id="${esc(item.productId)}" ${pending ? "disabled" : ""}>Прибрати</button></div>
-        <div class="qty"><button type="button" data-action="decrease" data-id="${esc(item.productId)}" aria-label="Зменшити кількість ${esc(product?.name || "товару")}" ${pending ? "disabled" : ""}>−</button><output aria-label="Кількість">${item.quantity}</output><button type="button" data-action="increase" data-id="${esc(item.productId)}" aria-label="Збільшити кількість ${esc(product?.name || "товару")}" ${pending || !product?.available || item.quantity >= Math.min(5, product?.stock || 0) ? "disabled" : ""}>+</button></div></div>`;
+        <div class="qty"><button type="button" data-action="decrease" data-id="${esc(item.productId)}" aria-label="Зменшити кількість ${esc(product?.name || "товару")}" ${pending ? "disabled" : ""}>−</button><output aria-label="Кількість">${item.quantity}</output><button type="button" data-action="increase" data-id="${esc(item.productId)}" aria-label="Збільшити кількість ${esc(product?.name || "товару")}" ${pending || !product?.available || item.quantity >= 5 ? "disabled" : ""}>+</button></div></div>`;
     }).join("") : '<div class="empty">Кошик поки порожній. Додайте товар із каталогу.</div>';
     updateControls();
   }
@@ -189,7 +189,7 @@
     if (pending || inFlight) return;
     const current = quantityOf(id), product = findProduct(id);
     const next = remove ? 0 : current + delta;
-    if (next > current && (!product?.available || next > Math.min(5, product.stock) || (!current && cart.length >= 20))) {
+    if (next > current && (!product?.available || next > 5 || (!current && cart.length >= 20))) {
       toast("Не вдалося збільшити кількість", "До 5 штук кожного товару та до 20 різних товарів у кошику.");
       return;
     }
@@ -341,7 +341,7 @@
         select.innerHTML = `<option value="">${title}</option>` + [...terms].sort((a,b)=>a[0].localeCompare(b[0],"uk")).map(([value,label])=>`<option value="${esc(value)}">${esc(label)}</option>`).join("");
         if (terms.has(selected)) select.value = selected;
       }
-      $("#storeNotice").textContent = "Ціни й характеристики перенесені з каталогу власника. Купівля доступна після підтвердження ціни та залишку. Онлайн-оплата вимкнена.";
+      $("#storeNotice").textContent = "Ціни й характеристики перенесені з каталогу власника. Купівля доступна для сортів у наявності з підтвердженою ціною. Онлайн-оплата вимкнена.";
       renderCatalog();
       if (initial) scheduleQuote();
     } catch (error) {

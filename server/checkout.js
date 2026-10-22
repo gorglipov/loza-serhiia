@@ -52,7 +52,7 @@ export function db(context) {
 }
 
 export async function requireSchema(database) {
-  const row = await database.prepare("SELECT version FROM loza_store_migrations WHERE version = ?").bind("0004_catalog_107").first();
+  const row = await database.prepare("SELECT version FROM loza_store_migrations WHERE version = ?").bind("0005_manual_availability").first();
   if (!row) throw new StoreError("STORE_UNAVAILABLE", "Магазин тимчасово недоступний. Спробуйте пізніше.", 503);
 }
 
@@ -175,13 +175,14 @@ export async function verifyTurnstile(context, token) {
 export async function quote(database, items) {
   // Placeholders depend only on a bounded item count, never on user text.
   const rows = await database.prepare(`SELECT p.id, p.name, p.price_kop, p.available, p.stock, p.is_demo,
-    c.confirmed_price_kop FROM products p LEFT JOIN product_catalog c ON c.product_id=p.id
+    c.confirmed_price_kop,a.in_stock FROM products p LEFT JOIN product_catalog c ON c.product_id=p.id
+    LEFT JOIN product_availability a ON a.product_id=p.id
     WHERE p.id IN (${items.map(() => "?").join(",")})`).bind(...items.map(item => item.productId)).all();
   const byId = new Map(rows.results.map(product => [product.id, product]));
   const lines = items.map(item => {
     const product = byId.get(item.productId);
-    if (!product || product.is_demo || !product.available || !Number.isSafeInteger(product.price_kop) || product.price_kop < 1 || product.confirmed_price_kop !== product.price_kop || product.stock < item.quantity) {
-      throw new StoreError("STOCK_UNAVAILABLE", "Деяких товарів немає в потрібній кількості. Оновіть кошик.", 409);
+    if (!product || product.is_demo || !product.in_stock || !Number.isSafeInteger(product.price_kop) || product.price_kop < 1 || product.confirmed_price_kop !== product.price_kop) {
+      throw new StoreError("STOCK_UNAVAILABLE", "Наявність або ціна товару змінилася. Оновіть кошик.", 409);
     }
     return { productId: product.id, name: product.name, quantity: item.quantity, unitPriceKop: product.price_kop, lineTotalKop: product.price_kop * item.quantity, stock: product.stock, isDemo: Boolean(product.is_demo) };
   });
