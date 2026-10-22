@@ -126,6 +126,25 @@
     $("#varietySuggestions").innerHTML = query ? products.filter(product => product.name.toLocaleLowerCase("uk").startsWith(query)).slice(0, 10).map(product => `<option value="${esc(product.name)}"></option>`).join("") : "";
   }
 
+  const paymentRadio = () => document.querySelector('input[name="paymentMode"]:checked');
+  function renderPaymentBreakdown() {
+    const total = Number.isSafeInteger(quoted?.amountKop) ? quoted.amountKop : null;
+    const depositOption = document.querySelector('input[name="paymentMode"][value="deposit_cod"]');
+    depositOption.disabled = total !== null && total < 10000;
+    if (depositOption.disabled && depositOption.checked) depositOption.checked = false;
+    const method = paymentRadio()?.value;
+    $("#storePaymentTotal").textContent = total === null ? "—" : price(total);
+    $("#storeAdvance").textContent = total === null || !method ? "—" : price(method === "full" ? total : 10000);
+    $("#storeCod").textContent = total === null || !method ? "—" : price(method === "full" ? 0 : total - 10000);
+    $("#storePaymentInfo").textContent = depositOption.disabled
+      ? "Для замовлень менше 100 грн доступна лише повна передоплата."
+      : method === "deposit_cod"
+        ? "100 грн — погоджена передоплата; решта — післяплата при отриманні. Доставка й комісії не включені."
+        : method === "full" ? "Суму товарів потрібно узгодити з продавцем. Оплата на сайті вимкнена."
+        : "Оберіть умови оплати, щоб побачити розрахунок.";
+  }
+  document.querySelectorAll('input[name="paymentMode"]').forEach(input => input.addEventListener("change", () => { renderPaymentBreakdown(); updateControls(); }));
+
   function updateControls() {
     const empty = !cart.length;
     $("#cartCount").textContent = String(cart.reduce((sum, item) => sum + item.quantity, 0));
@@ -136,7 +155,8 @@
     $("#storeRecovery").hidden = !pending || receiptShown;
     $("#storeRecoverButton").disabled = recovering || inFlight;
     $("#storeFields").disabled = inFlight || Boolean(pendingPayload);
-    $("#storeSubmit").disabled = inFlight || recovering || !config?.checkoutAvailable || !token || (!pending && (!quoted || quoteLoading));
+    $("#storeSubmit").disabled = inFlight || recovering || !config?.checkoutAvailable || !token || (!pending && (!quoted || quoteLoading || !paymentRadio()));
+    renderPaymentBreakdown();
     $("#storeSubmit").textContent = inFlight ? "Створюємо замовлення…" : pending ? "Повторити надсилання" : "Оформити замовлення";
     $("#storeTotal").textContent = quoted ? price(quoted.amountKop) : quoteLoading ? "Розраховуємо…" : "—";
     $("#storeRefreshQuote").hidden = !cart.length || receiptShown || Boolean(quoted) || quoteLoading || Boolean(pending);
@@ -264,6 +284,12 @@
     $("#storeOrderNumber").textContent = data.orderId;
     $("#storeOrderAmount").textContent = price(data.amountKop);
     $("#storeOrderStatus").textContent = data.status === "pending" ? "Очікує підтвердження" : "Статус оновлено продавцем";
+    const payment = data.payment || {};
+    $("#storeReceiptPayment").textContent = payment.mode === "deposit_cod"
+      ? "Обрано: 100 грн передоплати + " + price(payment.codKop) + " післяплатою. Оплата ще не підтверджена."
+      : payment.mode === "full"
+        ? "Обрано: повна передоплата " + price(payment.advanceKop) + ". Оплата ще не підтверджена."
+        : "Умови оплати уточнюються з продавцем.";
     const latest = readCart();
     // Remove purchased quantities only; other tabs may have added more items.
     cart = latest.length ? latest : cart;
@@ -295,10 +321,128 @@
     } finally { recovering = false; updateControls(); }
   }
 
+
+  // Official Nova Poshta settlements and warehouse lists (no key is exposed to the browser).
+  function setupNovaPoshtaAutocomplete() {
+    const city = $("#storeCity"), branch = $("#storeBranch");
+    const cityRef = $("#storeCityRef"), branchRef = $("#storeBranchRef");
+    const cityStatus = $("#npCityStatus"), branchStatus = $("#npBranchStatus");
+
+    function createLookup(input, list, status, type, onSelected) {
+      let controller = null, timer = null, sequence = 0, options = [], active = -1;
+      const close = () => { list.hidden = true; input.setAttribute("aria-expanded", "false"); active = -1; };
+      const show = items => {
+        options = items.slice(0, 15);
+        list.replaceChildren();
+        for (const [index, item] of options.entries()) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "np-option";
+          button.setAttribute("role", "option");
+          button.textContent = item.label;
+          button.addEventListener("pointerdown", event => event.preventDefault());
+          button.addEventListener("click", () => select(index));
+          list.appendChild(button);
+        }
+        list.hidden = !options.length;
+        input.setAttribute("aria-expanded", String(Boolean(options.length)));
+        if (!options.length) status.textContent = "Немає збігів. Уточніть назву або номер.";
+      };
+      const select = index => {
+        const item = options[index];
+        if (!item) return;
+        input.value = type === "settlements" ? item.description : item.label;
+        onSelected(item);
+        close();
+      };
+      async function load() {
+        const seq = ++sequence;
+        controller?.abort();
+        const search = input.value.trim();
+        if (type === "settlements" && !search) {
+          close(); status.textContent = "Почніть вводити назву міста або села."; return;
+        }
+        if (type === "warehouses" && !cityRef.value) {
+          close(); status.textContent = "Спочатку виберіть населений пункт зі списку."; return;
+        }
+        controller = new AbortController();
+        status.textContent = "Шукаємо у довіднику Нової пошти…";
+        const params = new URLSearchParams({ type, q: search });
+        if (type === "warehouses") params.set("settlementRef", cityRef.value);
+        try {
+          const response = await fetch("/api/np?" + params, {
+            credentials: "same-origin", cache: "no-store", signal: controller.signal,
+          });
+          const result = await response.json();
+          if (!response.ok || !result.ok || !Array.isArray(result.data)) {
+            throw new Error(result.error || "Довідник тимчасово недоступний.");
+          }
+          if (seq !== sequence || search !== input.value.trim()) return;
+          show(result.data);
+          if (options.length) status.textContent = "Виберіть варіант зі списку.";
+        } catch (error) {
+          if (error.name === "AbortError" || seq !== sequence) return;
+          close(); status.textContent = error.message || "Не вдалося отримати довідник.";
+          status.classList.add("error");
+        }
+      }
+      const schedule = (delay = 250) => {
+        clearTimeout(timer);
+        controller?.abort();
+        sequence++;
+        status.classList.remove("error");
+        timer = setTimeout(() => { void load(); }, delay);
+      };
+      input.addEventListener("focus", () => schedule(0));
+      input.addEventListener("keydown", event => {
+        if (event.key === "Escape") { close(); return; }
+        if (list.hidden || !options.length) return;
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault();
+          active = event.key === "ArrowDown" ? (active + 1) % options.length : (active + options.length - 1) % options.length;
+          [...list.children].forEach((button, index) => { button.style.background = index === active ? "#edf3e9" : ""; });
+        }
+        if (event.key === "Enter" && active >= 0) { event.preventDefault(); select(active); }
+      });
+      input.addEventListener("blur", () => setTimeout(close, 180));
+      return { schedule, close, cancel: () => { clearTimeout(timer); controller?.abort(); sequence++; close(); } };
+    }
+
+    const branchLookup = createLookup(branch, $("#npBranchOptions"), branchStatus, "warehouses", item => {
+      branchRef.value = item.ref;
+      branchStatus.textContent = "Відділення вибрано.";
+    });
+    const cityLookup = createLookup(city, $("#npCityOptions"), cityStatus, "settlements", item => {
+      cityRef.value = item.ref;
+      branch.value = ""; branchRef.value = ""; branch.disabled = false;
+      branch.placeholder = "Введіть номер або назву відділення";
+      branchStatus.textContent = "Натисніть на поле, щоб переглянути відділення.";
+      branchLookup.cancel();
+    });
+    city.addEventListener("input", () => {
+      cityRef.value = ""; branchRef.value = ""; branch.value = ""; branch.disabled = true;
+      branchLookup.cancel(); cityLookup.schedule();
+    });
+    branch.addEventListener("input", () => { branchRef.value = ""; branchLookup.schedule(); });
+    $("#storeForm").addEventListener("reset", () => {
+      cityLookup.cancel(); branchLookup.cancel();
+      cityRef.value = ""; branchRef.value = ""; branch.disabled = true;
+      cityStatus.textContent = "Оберіть населений пункт зі списку Нової пошти.";
+      branchStatus.textContent = "Список відділень з'явиться після вибору міста або села.";
+    });
+  }
+  setupNovaPoshtaAutocomplete();
+
   $("#storeForm").addEventListener("submit", async event => {
     event.preventDefault();
     if (inFlight || recovering || receiptShown) return;
     if (!$("#storeForm").reportValidity()) return;
+    if (!paymentRadio()) { feedback("Оберіть умови оплати.", "error"); return; }
+    if (!pendingPayload && (!$("#storeCityRef").value || !$("#storeBranchRef").value)) {
+      feedback("Оберіть місто або село та відділення зі списків Нової пошти.", "error");
+      (!$("#storeCityRef").value ? $("#storeCity") : $("#storeBranch")).focus();
+      return;
+    }
     if (!token) { feedback("Пройдіть перевірку перед надсиланням.", "error"); return; }
     if (!pending && (!quoted || quoteLoading || !cart.length)) { feedback("Дочекайтеся розрахунку кошика.", "error"); return; }
     const input = pendingPayload || {
@@ -306,6 +450,7 @@
       customer: { name: $("#storeBuyer").value.trim(), phone: $("#storePhone").value.trim() },
       delivery: { city: $("#storeCity").value.trim(), method: $("#storeDelivery").value, branch: $("#storeBranch").value.trim() },
       comment: $("#storeComment").value.trim(),
+      payment: { mode: paymentRadio()?.value || "" },
     };
     pending ||= { key: makeKey(), items: input.items.map(item => ({ ...item })) };
     pendingPayload = input;
@@ -390,7 +535,7 @@
     const result = await Promise.allSettled([loadCatalog(), api("/api/store/config", { signal: timeoutSignal(12000) })]);
     if (result[1].status === "fulfilled") {
       config = result[1].value;
-      $("#storeDelivery").innerHTML = config.deliveryMethods.map(method => `<option value="${esc(method.id)}">${esc(method.name)}</option>`).join("");
+      // Only Nova Poshta is supported; delivery is a fixed hidden field.
       if ($("#overlay").classList.contains("show")) void mountTurnstile();
     }
     updateControls();

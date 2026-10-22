@@ -2,7 +2,6 @@ const encoder = new TextEncoder();
 export const MAX_QUANTITY = 5;
 export const DELIVERY_METHODS = [
   { id: "nova_poshta", name: "Нова пошта" },
-  { id: "ukrposhta", name: "Укрпошта" },
 ];
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -115,7 +114,30 @@ export function normalizeOrder(input) {
   const branch = text(input.delivery?.branch, "Відділення доставки", 1, 180);
   const commentInput = input.comment ?? "";
   const comment = text(typeof commentInput === "string" ? commentInput.replace(/[\r\n\t]/g, " ") : commentInput, "Коментар", 0, 1000);
-  return { items, customer: { name, phone }, delivery: { city, method, branch }, comment };
+  const paymentMode = input.payment?.mode;
+  if (!["full", "deposit_cod"].includes(paymentMode)) {
+    throw new StoreError("INVALID_PAYMENT", "Оберіть повну передоплату або передоплату 100 грн із післяплатою.");
+  }
+  return { items, customer: { name, phone }, delivery: { city, method, branch }, comment, payment: { mode: paymentMode } };
+}
+
+// Payment preference only; no card charge, payment acceptance or bank verification.
+export function paymentBreakdown(amountKop, mode) {
+  if (!Number.isSafeInteger(amountKop) || amountKop < 1 || !["full","deposit_cod"].includes(mode)) {
+    throw new StoreError("INVALID_PAYMENT", "Не вдалося розрахувати спосіб оплати.");
+  }
+  if (mode === "deposit_cod" && amountKop < 10000) {
+    throw new StoreError("INVALID_PAYMENT", "Передоплата 100 грн доступна лише для замовлень від 100 грн.");
+  }
+  const advanceKop = mode === "full" ? amountKop : 10000;
+  return { mode, advanceKop, codKop: amountKop - advanceKop };
+}
+export const paymentMarker = mode => "[LOZA_PAYMENT:" + mode + "] ";
+export function paymentFromStored(comment, amountKop) {
+  const match = /^\[LOZA_PAYMENT:(full|deposit_cod)\] /.exec(comment || "");
+  if (!match) return { mode: null, advanceKop: null, codKop: null };
+  try { return paymentBreakdown(amountKop, match[1]); }
+  catch { return { mode: null, advanceKop: null, codKop: null }; }
 }
 
 export async function digest(value) {
@@ -190,11 +212,11 @@ export async function quote(database, items) {
 }
 
 export async function findReceipt(database, keyHash) {
-  return database.prepare(`SELECT o.id, o.amount_kop, o.status, c.payload_hash, c.demo_only
+  return database.prepare(`SELECT o.id, o.amount_kop, o.status, c.payload_hash, c.demo_only, c.comment
     FROM order_checkout c JOIN orders o ON o.id = c.order_id WHERE c.request_key_hash = ?`).bind(keyHash).first();
 }
 
 export function receipt(row, status = 200) {
   // No customer, phone, delivery or comments are returned, even to key holders.
-  return json({ success: true, orderId: row.id, amountKop: row.amount_kop, amount: row.amount_kop / 100, currency: "UAH", status: row.status, statusLabel: row.status === "pending" ? "Очікує підтвердження" : "Статус оновлено продавцем", testOnly: Boolean(row.demo_only), paymentsEnabled: false }, status);
+  return json({ success: true, orderId: row.id, amountKop: row.amount_kop, amount: row.amount_kop / 100, currency: "UAH", status: row.status, statusLabel: row.status === "pending" ? "Очікує підтвердження" : "Статус оновлено продавцем", payment: paymentFromStored(row.comment, row.amount_kop), paymentVerified: false, testOnly: Boolean(row.demo_only), paymentsEnabled: false }, status);
 }

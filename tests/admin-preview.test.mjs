@@ -1,6 +1,7 @@
 // Runs the real compiled Pages worker + isolated Miniflare D1. No remote DB/bot.
 import {test,before,beforeEach,after} from 'node:test';
 import assert from 'node:assert/strict';
+import {paymentBreakdown,normalizeOrder} from '../server/checkout.js';
 import {readFile} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
 import {webcrypto} from 'node:crypto';
@@ -81,12 +82,28 @@ before(async()=>{
 after(async()=>{if(mf)await mf.dispose();});
 beforeEach(async()=>{await db.prepare('DELETE FROM checkout_rate_limits').run();});
 
-test('all 107 PDF rows, 84 exact prices and 28 kishmish markers survive; unconfirmed prices cannot be bought',async()=>{
+test('public catalog hides 23 unpriced varieties while admin retains all 107; unconfirmed prices cannot be bought',async()=>{
   const source=JSON.parse(await readFile(new URL('server/catalog-source.json',root),'utf8'));
   const response=await json('/api/products',{auth:null});assert.equal(response.status,200);
-  const catalog=response.data.products;assert.equal(catalog.length,107);
-  assert.equal(catalog.filter(p=>p.priceKop!==null).length,84);assert.equal(catalog.filter(p=>p.details.kishmish).length,28);
-  for(const expected of source){const p=catalog.find(p=>p.id===expected.id);assert.ok(p);assert.equal(p.name,expected.name);assert.deepEqual(p.details,expected.details);assert.equal(p.priceKop,expected.priceKop);assert.equal(p.priceConfirmed,false);assert.equal(p.available,false);assert.equal(p.stock,0);}
+  const catalog=response.data.products;
+  const priced=source.filter(p=>p.priceKop!==null && p.priceKop>0);
+  assert.equal(source.length,107);
+  assert.equal(priced.length,84);
+  assert.equal(catalog.length,priced.length);
+  assert.ok(catalog.every(p=>p.priceKop!==null && p.priceKop>0));
+  assert.equal(catalog.filter(p=>p.details.kishmish).length,priced.filter(p=>p.details.kishmish).length);
+  const adminCatalog=(await json('/api/admin/products')).data.products;
+  assert.equal(adminCatalog.length,107);
+  for(const expected of source){
+    const p=catalog.find(p=>p.id===expected.id);
+    const admin=adminCatalog.find(p=>p.id===expected.id);
+    assert.ok(admin,"Admin must retain "+expected.id);
+    assert.equal(admin.price_kop,expected.priceKop);
+    if(expected.priceKop===null){assert.equal(p,undefined,"Unpriced products must stay hidden publicly");continue;}
+    assert.ok(p);assert.equal(p.name,expected.name);assert.deepEqual(p.details,expected.details);
+    assert.equal(p.priceKop,expected.priceKop);assert.equal(p.priceConfirmed,false);
+    assert.equal(p.available,false);assert.equal(p.stock,0);
+  }
   for(const id of ['grape-demo','loza-001','loza-002'])assert.equal((await json('/api/cart/quote',{auth:null,data:{items:[{productId:id,quantity:1}]}})).status,409);
   await assert.rejects(db.prepare("UPDATE products SET available=1,stock=10 WHERE id='loza-002'").run(),/LOZA_(PRICE_NOT_CONFIRMED|MANUAL_STOCK)/);
   const products=(await json('/api/admin/products')).data.products;
@@ -154,14 +171,26 @@ test('migration is repeatable and preserves legacy orders and bank events',async
   assert.ok(search.data.products.some(p=>p.name==='Аватар'));
 });
 let orderId;
-const checkout={items:[{productId:'loza-002',quantity:2}],customer:{name:'Preview Buyer',phone:'+380991234567'},delivery:{city:'Preview City',method:'nova_poshta',branch:'Private delivery 55'},comment:'Private comment',turnstileToken:'isolated-fixture'};
+const checkout={items:[{productId:'loza-002',quantity:2}],customer:{name:'Preview Buyer',phone:'+380991234567'},delivery:{city:'Preview City',method:'nova_poshta',branch:'Private delivery 55'},comment:'Private comment',payment:{mode:'deposit_cod'},turnstileToken:'isolated-fixture'};
+test('payment options use trusted integer kopecks and reject invalid deposit amounts',()=>{
+  assert.deepEqual(paymentBreakdown(15000,'deposit_cod'),{mode:'deposit_cod',advanceKop:10000,codKop:5000});
+  assert.deepEqual(paymentBreakdown(15000,'full'),{mode:'full',advanceKop:15000,codKop:0});
+  assert.deepEqual(paymentBreakdown(10000,'deposit_cod'),{mode:'deposit_cod',advanceKop:10000,codKop:0});
+  assert.throws(()=>paymentBreakdown(9900,'deposit_cod'),/100 грн/);
+  assert.throws(()=>paymentBreakdown(15000,'unknown'),/оплати/);
+  assert.equal(normalizeOrder(checkout).payment.mode,'deposit_cod');
+  assert.throws(()=>normalizeOrder({...checkout,payment:{mode:'invalid'}}),/Оберіть/);
+});
 test('order commit queues one message; concurrent replay never creates duplicate orders/events',async()=>{
-  const key=crypto.randomUUID();const response=await json('/api/orders/create',{data:{...checkout,amountKop:1},key});assert.equal(response.status,201);orderId=response.data.orderId;assert.equal(response.data.amountKop,30000);
+  const key=crypto.randomUUID();const response=await json('/api/orders/create',{data:{...checkout,amountKop:1},key});assert.equal(response.status,201);orderId=response.data.orderId;assert.equal(response.data.amountKop,30000);assert.deepEqual(response.data.payment,{mode:'deposit_cod',advanceKop:10000,codKop:20000});assert.equal(response.data.paymentVerified,false);
   await Promise.all([json('/api/orders/create',{data:checkout,key}),json('/api/orders/create',{data:checkout,key})]);await settle();
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM order_checkout').first()).n,1);
+  const savedPayment=await db.prepare('SELECT comment FROM order_checkout WHERE order_id=?').bind(orderId).first();
+  assert.match(savedPayment.comment,/^\[LOZA_PAYMENT:deposit_cod\] /);
+  assert.ok(savedPayment.comment.endsWith('Private comment'));
   assert.equal((await db.prepare("SELECT COUNT(*) n FROM telegram_outbox WHERE order_id=?").bind(orderId).first()).n,1);
   const event=await db.prepare('SELECT state,message_id FROM telegram_outbox WHERE order_id=?').bind(orderId).first();assert.equal(event.state,'sent');
-  const text=sent.find(x=>x.text.includes(orderId))?.text;assert.ok(text);assert.match(text,/× 2/);assert.match(text,/300.00 грн/);
+  const text=sent.find(x=>x.text.includes(orderId))?.text;assert.ok(text);assert.match(text,/× 2/);assert.match(text,/300.00 грн/);assert.match(text,/Передоплата 100 грн|передоплата 100 грн/);assert.match(text,/Оплата: не перевірена/);
   for(const pii of ['Preview Buyer','380991234567','Preview City','Private delivery','Private comment'])assert.ok(!text.includes(pii));
   assert.equal(sent.filter(x=>x.text.includes(orderId)).length,1);
 });
@@ -271,6 +300,9 @@ test('CSV full 107-row import is atomic, audited and replay safe; preserves sour
   const replay=await json('/api/admin/catalog/import',{data:payload,key});assert.equal(replay.status,200);assert.equal(replay.data.replayed,true);
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM admin_audit_log').first()).n,before+107);
   const quote=await json('/api/cart/quote',{auth:null,data:{items:[{productId:'loza-001',quantity:2}],priceKop:1}});assert.equal(quote.status,200);assert.equal(quote.data.amountKop,24690);
+  // Once an administrator sets a price, the previously hidden variety reappears automatically.
+  const publicCatalog=(await json('/api/products',{auth:null})).data.products;
+  assert.equal(publicCatalog.find(p=>p.id==='loza-001')?.priceKop,12345);
   const row=await db.prepare("SELECT source_json FROM product_catalog WHERE product_id='loza-001'").first();assert.equal(JSON.parse(row.source_json).priceKop,null);
   await apply('migrations/0005_manual_availability.sql');assert.equal((await db.prepare("SELECT price_kop,stock FROM products WHERE id='loza-001'").first()).price_kop,12345);
   assert.equal((await db.prepare("SELECT COUNT(*) n FROM orders WHERE id='LEGACY-1'").first()).n,1);assert.equal((await db.prepare('SELECT COUNT(*) n FROM mono_events').first()).n,1);
@@ -312,15 +344,23 @@ test('catalog cards, search, all filters and cart work without photos on desktop
   const {chromium}=await import(pathToFileURL(process.env.LOZA_PLAYWRIGHT_MODULE).href),browser=await chromium.launch({channel:'msedge',headless:true});
   try{for(const width of [1440,390,320]){
     const page=await browser.newPage({viewport:{width,height:900},reducedMotion:'reduce'}),errors=[];page.on('pageerror',error=>errors.push(error.message));
-    await page.goto((await mf.ready).origin+'/');await page.waitForFunction(()=>document.querySelectorAll('#grid article').length===107);
-    assert.equal(await page.locator('#grid img,#grid picture,#grid canvas').count(),0);assert.equal(await page.locator('.kishmish-badge').count(),28);
+    const visible=(await json('/api/products',{auth:null})).data.products;
+    await page.goto((await mf.ready).origin+'/');
+    await page.waitForFunction(expected=>document.querySelectorAll('#grid article').length===expected,visible.length);
+    assert.equal(await page.locator('#grid img,#grid picture,#grid canvas').count(),0);
+    assert.equal(await page.locator('.kishmish-badge').count(),visible.filter(p=>p.details.kishmish).length);
     assert.ok(await page.getByText('Немає в наявності',{exact:true}).count()>0);
-    await page.locator('#search').fill('Академік');assert.equal(await page.locator('.catalog-price .price').innerText(),'Ціну уточнюйте');
-    assert.equal(await page.getByRole('button',{name:'Замовлення недоступне',exact:true}).isEnabled(),false);
-    assert.equal(((await page.locator('#grid').innerText()).match(/Немає в наявності/g)||[]).length,1);await page.locator('#resetFilters').click();
+    await page.locator('#search').fill('Академік');
+    assert.equal(await page.locator('#grid article').count(),0);
+    assert.equal(await page.locator('#varietySuggestions option[value="Академік"]').count(),0);
+    await page.locator('#resetFilters').click();
     await page.locator('#search').fill('Алвіка');assert.equal(await page.locator('#grid article').count(),1);await page.locator('#resetFilters').click();
-    await page.locator('#kishmish').selectOption('1');assert.equal(await page.locator('#grid article').count(),28);await page.locator('#resetFilters').click();
-    await page.locator('#ripening').selectOption('ранньо-середній');assert.equal(await page.locator('#grid article').count(),13);await page.locator('#resetFilters').click();
+    await page.locator('#kishmish').selectOption('1');
+    assert.equal(await page.locator('#grid article').count(),visible.filter(p=>p.details.kishmish).length);
+    await page.locator('#resetFilters').click();
+    await page.locator('#ripening').selectOption('ранньо-середній');
+    assert.equal(await page.locator('#grid article').count(),visible.filter(p=>p.details.ripening?.toLocaleLowerCase('uk')==='ранньо-середній').length);
+    await page.locator('#resetFilters').click();
     await page.locator('#color').selectOption('темно-синій');assert.ok(await page.locator('#grid article').count()>0);assert.ok(await page.locator('#grid article').count()<107);await page.locator('#resetFilters').click();
     await page.locator('#priceMin').fill('120');await page.locator('#priceMax').fill('150');assert.ok(await page.locator('#grid article').count()>0);await page.locator('#resetFilters').click();
     await page.locator('#search').fill('Абажур');await page.getByRole('button',{name:'Додати до кошика',exact:true}).click();await page.locator('#openCart').click();await page.locator('#storeBuyer').waitFor();
@@ -341,7 +381,9 @@ test('manual switch works without a price; edits are audited, versioned and idem
   const id='loza-003',original=await adminProduct(id),key=crypto.randomUUID(),input={version:original.version,inStock:true};
   const before=(await db.prepare('SELECT COUNT(*) n FROM admin_audit_log WHERE target=?').bind(id).first()).n;
   assert.equal((await json('/api/admin/products/'+id+'/availability',{data:input,key})).status,200);
-  let p=(await json('/api/products',{auth:null})).data.products.find(p=>p.id===id);assert.equal(p.inStock,true);assert.equal(p.available,false);assert.equal(p.priceKop,null);assert.equal(p.stock,20);
+  // Unpriced varieties do not leak back to the public catalog when their availability is toggled.
+  assert.equal((await json('/api/products',{auth:null})).data.products.find(p=>p.id===id),undefined);
+  let p=await adminProduct(id);assert.equal(p.inStock,true);assert.equal(p.confirmed_price_kop,null);assert.equal(p.price_kop,null);assert.equal(p.stock,20);
   assert.equal((await json('/api/cart/quote',{data:{items:[{productId:id,quantity:1}]}})).status,409);
   const {parseCsv}=await import('../server/catalog.js');const csv=await exported(),row=parseCsv(csv).find(p=>p.product_id===id);assert.equal(row.available,'1');assert.equal(row.price_uah,'');assert.ok(!Object.hasOwn(row,'stock'));
   assert.equal((await json('/api/admin/catalog/preview',{data:{csv}})).status,200);

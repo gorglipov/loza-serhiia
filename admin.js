@@ -48,20 +48,44 @@
     const kishLabel=el('label',undefined,'check wide'),kish=el('input');kish.type='checkbox';kish.checked=!!product.details.kishmish;kishLabel.append(kish,document.createTextNode('Кишмиш'));grid.append(kishLabel);
     const reviewedLabel=el('label',undefined,'check wide'),reviewed=el('input');reviewed.type='checkbox';reviewed.checked=!!product.characteristics_confirmed;reviewedLabel.append(reviewed,document.createTextNode('Характеристики перевірено власником'));grid.append(reviewedLabel);
     if(product.source)form.append(el('p',`Джерело: ${product.source.document}, сторінка ${product.source.page}, рядок ${product.source.row}. Ціна у PDF: ${money(product.source.priceKop)}. Оригінальні дані джерела зберігаються окремо. Фото не потрібне.`,'hint'));
-    price.addEventListener('input',()=>confirmed.checked=false);
-    form.append(grid,el('p','Наявність змінюєте лише ви. Замовлення та їх скасування її не змінюють. Для купівлі також потрібна підтверджена ціна.','hint'));
-    const submit=el('button','Зберегти товар','primary');submit.type='submit';form.append(submit);
+    const confirmationHint=el('p',confirmed.checked?'Ціна підтверджена — замовлення залежать від наявності.':'Ціна ще не підтверджена. Для покупки потрібно підтвердити її окремо.','hint');
+    const updateHint=()=>{confirmationHint.textContent=confirmed.checked
+      ? 'Ціну буде підтверджено після успішного збереження.'
+      : 'Ціна не підтверджена — навіть якщо сорт «В наявності», покупка буде заблокована.';};
+    price.addEventListener('input',()=>{
+      // Any change to a previously confirmed price requires an explicit confirmation again.
+      confirmed.checked=false;updateHint();
+    });
+    confirmed.addEventListener('change',updateHint);
+    form.append(grid,confirmationHint,el('p','Наявність змінюєте лише ви. Замовлення та їх скасування її не змінюють. Для купівлі також потрібна підтверджена ціна.','hint'));
+    const submit=el('button','Зберегти товар','secondary');submit.type='submit';
+    const confirmSubmit=el('button','Підтвердити ціну і зберегти','primary');confirmSubmit.type='button';
+    confirmSubmit.addEventListener('click',()=>{
+      if(!price.value.trim()){notice('Спочатку введіть ціну товару.',true);price.focus();return;}
+      confirmed.checked=true;updateHint();form.requestSubmit();
+    });
+    form.append(submit,confirmSubmit);
     form.addEventListener('submit',e=>{e.preventDefault();saving(async()=>{
       const value=price.value.trim().replace(',','.');if(value && !/^\d{1,7}(\.\d{1,2})?$/.test(value))throw new Error('Введіть ціну, наприклад 500,00.');
       const [whole,fraction='']=value.split('.');const priceKop=value?Number(whole)*100+Number(fraction.padEnd(2,'0')):null;
+      if(confirmed.checked && priceKop===null)throw new Error('Спочатку введіть ціну, потім підтвердьте її.');
       const details={kishmish:kish.checked};Object.entries(fields).forEach(([key,input])=>details[key]=input.value);
-      await api('products/'+encodeURIComponent(product.id),{version:product.version,name:name.value,priceKop,priceConfirmed:confirmed.checked,characteristicsConfirmed:reviewed.checked,available:active.checked,details});dialog.close();await load();
+      await api('products/'+encodeURIComponent(product.id),{version:product.version,name:name.value,priceKop,priceConfirmed:confirmed.checked,characteristicsConfirmed:reviewed.checked,available:active.checked,details});
+      // Verify the same environment's persisted D1 state; do not say "confirmed" just because the POST returned 200.
+      const verification=await api('products?'+new URLSearchParams({q:product.id}));
+      const saved=verification.products?.find(row=>row.id===product.id);
+      if(!saved || saved.price_kop!==priceKop || (confirmed.checked && saved.confirmed_price_kop!==priceKop)){
+        throw new Error('Підтвердження ціни не збережено на сервері. Не оновлюйте ціну повторно; перевірте середовище Preview/Production.');
+      }
+      const wasConfirmed=Boolean(confirmed.checked);
+      dialog.close();await load();
+      return wasConfirmed ? 'Ціну підтверджено й збережено. Перевірте наявність і відкрийте каталог у цьому ж середовищі.' : 'Товар збережено без підтвердження ціни.';
     });});$('editorBody').append(form);
   }
   async function editOrder(id) {
     try{
       const {order:o,items}=await api('orders/'+encodeURIComponent(id));openEditor('Замовлення');
-      const dl=el('dl',undefined,'detail');for(const [label,value]of [['Номер',o.id],['Дата',date(o.created_at)],['Сума',money(o.amount_kop)],['Покупець',o.buyer_name],['Телефон',o.phone],['Доставка',[o.city,o.delivery_method==='nova_poshta'?'Нова пошта':o.delivery_method==='ukrposhta'?'Укрпошта':'',o.delivery_branch].filter(Boolean).join(' · ')],['Коментар',o.comment || '—']])dl.append(el('dt',label),el('dd',value || '—'));
+      const dl=el('dl',undefined,'detail');for(const [label,value]of [['Номер',o.id],['Дата',date(o.created_at)],['Сума',money(o.amount_kop)],['Покупець',o.buyer_name],['Телефон',o.phone],['Доставка',[o.city,o.delivery_method==='nova_poshta'?'Нова пошта':o.delivery_method==='ukrposhta'?'Укрпошта':'',o.delivery_branch].filter(Boolean).join(' · ')],['Умови оплати',/^\[LOZA_PAYMENT:deposit_cod\] /.test(o.comment||'') ? 'Передоплата 100 грн, післяплата '+money(Math.max(0,o.amount_kop-10000)) : /^\[LOZA_PAYMENT:full\] /.test(o.comment||'') ? 'Повна передоплата '+money(o.amount_kop) : 'Не обрано (старе замовлення)'],['Переказ','Не підтверджено'],['Коментар',(o.comment||'').replace(/^\[LOZA_PAYMENT:(?:full|deposit_cod)\] /,'') || '—']])dl.append(el('dt',label),el('dd',value || '—'));
       $('editorBody').append(dl,table(['Товар','Кількість','Сума'],items.map(i=>[i.product_name,i.quantity,money(i.line_total_kop)])));
       const form=el('form'),label=el('label','Статус замовлення'),select=el('select');
       const next={pending:['confirmed','cancelled'],confirmed:['shipped','cancelled'],shipped:['completed']}[o.status] || [];
