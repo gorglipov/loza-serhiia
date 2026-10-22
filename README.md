@@ -2,6 +2,8 @@
 
 ## Адмінпанель і Telegram (нова гілка)
 
+Остання перевірка перед Merge, фактична Production-схема, тести та залишкові ризики: [PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md).
+
 `/admin`: огляд, товари/характеристики/склад, замовлення та статуси, аудит, керування сповіщеннями й авторизований тест існуючого бота. `/admin` та `/api/admin/*` перевіряють JWT Cloudflare Access на сервері; без налаштування доступ закритий. Нова адитивна міграція — `migrations/0003_admin_telegram.sql`.
 
 Telegram використовує наявні `TELEGRAM_BOT_TOKEN` і `TELEGRAM_CHAT_ID`, не змінює webhook і не передає контакти покупця. D1 outbox має дедуплікацію, claim/lease та контрольовані повтори. Для повторів без нових запитів підготовлено окремий Cron Worker.

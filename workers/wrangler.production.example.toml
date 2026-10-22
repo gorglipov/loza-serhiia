@@ -1,0 +1,13 @@
+name = "loza-telegram-retry-production"
+main = "telegram-retry.js"
+compatibility_date = "2026-10-22"
+workers_dev = false
+preview_urls = false
+[triggers]
+crons = ["* * * * *"]
+[[d1_databases]]
+binding = "DB"
+database_name = "grape-orders"
+database_id = "REPLACE_WITH_VERIFIED_PRODUCTION_DATABASE_ID"
+# Set the existing TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID as Worker secrets.
+# This example is not deployed by a Pages build or a GitHub merge.

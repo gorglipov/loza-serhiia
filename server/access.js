@@ -39,7 +39,7 @@ function settings(env) {
   const configuration=adminConfiguration(env);
   const invalidFields=Object.keys(configuration).filter(name=>!configuration[name].formatValid);
   if (invalidFields.length) {
-    const error=new StoreError('ADMIN_NOT_CONFIGURED','Перевірте налаштування Preview: '+invalidFields.join(', ')+'.',503);
+    const error=new StoreError('ADMIN_NOT_CONFIGURED','Перевірте налаштування адміністратора: '+invalidFields.join(', ')+'.',503);
     error.configuration=configuration;
     throw error;
   }

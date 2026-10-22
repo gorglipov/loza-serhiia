@@ -46,7 +46,7 @@ export async function adminApi(context) {
     if(!context.data.admin) throw new StoreError('ADMIN_FORBIDDEN','Доступ заборонено.',403);
     const database=db(context);
     const schema=await database.prepare("SELECT version FROM loza_store_migrations WHERE version='0003_admin_telegram'").first();
-    if(!schema) throw new StoreError('ADMIN_SCHEMA_REQUIRED','Спочатку застосуйте міграцію 0003 до Preview D1.',503);
+    if(!schema) throw new StoreError('ADMIN_SCHEMA_REQUIRED','Спочатку застосуйте міграцію 0003 до D1 цього середовища.',503);
     await rateLimit(context,database,'admin',method==='GET'?180:30);
     const url=new URL(context.request.url), route=url.pathname.replace(/^\/api\/admin\/?/,'').replace(/\/$/,'');
     const actor=context.data.admin.email;

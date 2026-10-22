@@ -60,10 +60,18 @@ before(async()=>{
     }};
   mf=new Miniflare(convertV4MiniflareOptions?convertV4MiniflareOptions(options):options);
   db=await mf.getD1Database('DB');
-  await db.prepare("CREATE TABLE orders(id TEXT PRIMARY KEY, amount_kop INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'pending')").run();
-  await db.prepare('CREATE TABLE mono_events(id TEXT PRIMARY KEY)').run();
-  await db.prepare("INSERT INTO orders VALUES('LEGACY-1',10000,'pending')").run();
-  await db.prepare("INSERT INTO mono_events VALUES('bank-existing')").run();
+  if(process.env.LOZA_PRODUCTION_SCHEMA_FILE){
+    // Schema only, read from Production metadata; no customer/order/bank rows.
+    const schema=JSON.parse(await readFile(process.env.LOZA_PRODUCTION_SCHEMA_FILE,'utf8'));
+    for(const kind of ['table','index','trigger'])for(const entry of schema){
+      if(entry.type===kind && entry.sql)await db.prepare(entry.sql).run();
+    }
+  }else{
+    await db.prepare("CREATE TABLE orders(id TEXT PRIMARY KEY, amount_kop INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'pending')").run();
+    await db.prepare('CREATE TABLE mono_events(transaction_id TEXT PRIMARY KEY,account_id TEXT NOT NULL,amount_kop INTEGER NOT NULL,currency_code INTEGER NOT NULL,description TEXT,is_hold INTEGER NOT NULL DEFAULT 0)').run();
+  }
+  await db.prepare("INSERT INTO orders(id,amount_kop,status) VALUES('LEGACY-1',10000,'pending')").run();
+  await db.prepare("INSERT INTO mono_events(transaction_id,account_id,amount_kop,currency_code,description,is_hold) VALUES('bank-existing','fixture-account',10000,980,'isolated fixture',0)").run();
   await apply('migrations/0002_store_cart.sql');await apply('migrations/0003_admin_telegram.sql');await apply('migrations/0003_admin_telegram.sql');
   token=await jwt();const session=await json('/api/admin/session');assert.equal(session.status,200);csrf=session.data.csrfToken;
 });
@@ -78,13 +86,44 @@ test('private HTML and every admin API fail closed without a verified Access JWT
   assert.equal((await request('/admin')).status,200);
   assert.equal((await request('/api/admin/session',{auth:null,headers:{'Cf-Access-Authenticated-User-Email':admin}})).status,403);
 });
+test('every administrative mutation requires signed Access identity and CSRF before side effects',async()=>{
+  const before=await db.prepare('SELECT COUNT(*) n FROM admin_mutations').first(),outbox=await db.prepare('SELECT COUNT(*) n FROM telegram_outbox').first();
+  const routes=['products/grape-demo','orders/LEGACY-1/status','telegram/settings','telegram/test','telegram/retry'];
+  for(const route of routes){
+    for(const options of [{auth:null},{auth:'untrusted-jwt'},{auth:await jwt({email:'outsider@example.test'})},{csrfToken:''},{headers:{Origin:'https://evil.test'}}]){
+      const response=await request('/api/admin/'+route,{data:{},...options});assert.equal(response.status,403,route);assert.match(response.headers.get('Cache-Control'),/no-store/);
+    }
+  }
+  for(const route of ['','dashboard','products','orders/LEGACY-1','audit','unknown-route']){
+    assert.equal((await request('/api/admin/'+route,{auth:null})).status,403,route);
+  }
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM admin_mutations').first()).n,before.n);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM telegram_outbox').first()).n,outbox.n);
+});
+test('public catalog, cart quote and checkout config work without monobank configuration',async()=>{
+  assert.equal(env.MONO_TOKEN,undefined);assert.equal(env.MONO_WEBHOOK_KEY,undefined);
+  for(const path of ['/api/products','/api/store/config']){
+    const result=await json(path,{auth:null});assert.equal(result.status,200);assert.equal(result.data.paymentsEnabled,false);
+    if(path.endsWith('/config'))assert.equal(result.data.checkoutAvailable,true);
+  }
+  const quoted=await json('/api/cart/quote',{auth:null,data:{items:[{productId:'grape-demo',quantity:1}]}});
+  assert.equal(quoted.status,200);assert.equal(quoted.data.amountKop,50000);assert.equal(quoted.data.paymentsEnabled,false);
+});
+test('client assets and private/public responses never contain server secret values',async()=>{
+  const hidden=['ADMIN_CSRF_SECRET','CHECKOUT_SECURITY_KEY','TURNSTILE_SECRET_KEY','TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID'];
+  for(const path of ['/admin','/admin.js','/admin.css','/storefront.js','/storefront.css','/api/products','/api/store/config','/api/admin/session','/api/admin/dashboard','/api/admin/products','/api/admin/orders','/api/admin/audit','/api/admin/telegram']){
+    const response=await request(path),text=await response.text();assert.equal(response.status,200,path);
+    for(const key of hidden)assert.ok(!text.includes(env[key]),path+' exposed '+key);
+    if(path.startsWith('/api/admin') || path==='/admin')assert.match(response.headers.get('Cache-Control'),/no-store/);
+  }
+});
 test('CSRF is required and bound to verified JWT + exact origin',async()=>{
   for(const options of [{csrfToken:''},{headers:{Origin:'https://evil.test'}},{auth:await jwt({sub:'another-sub'})}]){
     const r=await request('/api/admin/telegram/test',{data:{},...options});assert.equal(r.status,403);
   }
 });
 test('migration is repeatable and preserves legacy orders and bank events',async()=>{
-  assert.equal((await db.prepare("SELECT COUNT(*) n FROM mono_events WHERE id='bank-existing'").first()).n,1);
+  assert.equal((await db.prepare("SELECT COUNT(*) n FROM mono_events WHERE transaction_id='bank-existing'").first()).n,1);
   assert.equal((await db.prepare("SELECT COUNT(*) n FROM orders WHERE id='LEGACY-1'").first()).n,1);
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM products').first()).n,110);
   const search=await json('/api/admin/products?q='+encodeURIComponent('аватар'));

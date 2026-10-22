@@ -21,9 +21,11 @@ export async function deliverPending(database,env,limit=5) {
   await database.prepare("UPDATE telegram_outbox SET state='uncertain',last_error='DELIVERY_UNCERTAIN',lease_token=NULL WHERE state='sending' AND lease_until<?").bind(now).run();
   const due=await database.prepare("SELECT id FROM telegram_outbox WHERE state IN('queued','retry') AND next_attempt<=? AND attempts<8 AND (?=1 OR kind='test') ORDER BY id LIMIT ?").bind(now,enabled?.enabled?1:0,Math.min(10,limit)).all();
   for(const {id} of due.results) {
+    // Each claimed event gets a full lease, even after slow earlier requests.
+    const claimedAt=Math.floor(Date.now()/1000);
     const lease=crypto.randomUUID();
     const event=await database.prepare(`UPDATE telegram_outbox SET state='sending',lease_token=?,lease_until=?,attempts=attempts+1
-      WHERE id=? AND state IN('queued','retry') AND next_attempt<=? AND attempts<8 RETURNING *`).bind(lease,now+90,id,now).first();
+      WHERE id=? AND state IN('queued','retry') AND next_attempt<=? AND attempts<8 RETURNING *`).bind(lease,claimedAt+90,id,claimedAt).first();
     if(!event) continue;
     let outcome={state:'uncertain',error:'DELIVERY_UNCERTAIN',next:0,messageId:null};
     try {
@@ -40,7 +42,7 @@ export async function deliverPending(database,env,limit=5) {
         // Retry only a confirmed rejection, never an ambiguous timeout/response loss.
         const retryable=result.error_code===429 || result.error_code>=500;
         const delay=Number.isInteger(result.parameters?.retry_after)?Math.max(1,Math.min(86400,result.parameters.retry_after)):Math.min(3600,15*2**event.attempts);
-        outcome={state:retryable && event.attempts<8?'retry':'failed',error:'TELEGRAM_'+result.error_code,next:now+delay,messageId:null};
+        outcome={state:retryable && event.attempts<8?'retry':'failed',error:'TELEGRAM_'+result.error_code,next:Math.floor(Date.now()/1000)+delay,messageId:null};
       }
     } catch { /* Unknown delivery outcome: do not automatically create a duplicate. */ }
     await database.prepare(`UPDATE telegram_outbox SET state=?,last_error=?,next_attempt=?,message_id=?,lease_token=NULL,
