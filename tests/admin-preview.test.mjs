@@ -77,6 +77,7 @@ before(async()=>{
   await db.prepare("INSERT INTO orders(id,amount_kop,status) VALUES('LEGACY-CANCELLED',10000,'cancelled')").run();
   await db.prepare("INSERT INTO admin_stock_returns(order_id) VALUES('LEGACY-CANCELLED')").run();
   await apply('migrations/0005_manual_availability.sql');await apply('migrations/0005_manual_availability.sql');
+  await apply('migrations/0009_payment_tracking.sql');await apply('migrations/0009_payment_tracking.sql');
   token=await jwt();const session=await json('/api/admin/session');assert.equal(session.status,200);csrf=session.data.csrfToken;
 });
 after(async()=>{if(mf)await mf.dispose();});
@@ -129,7 +130,7 @@ test('private HTML and every admin API fail closed without a verified Access JWT
 });
 test('every administrative mutation requires signed Access identity and CSRF before side effects',async()=>{
   const before=await db.prepare('SELECT COUNT(*) n FROM admin_mutations').first(),outbox=await db.prepare('SELECT COUNT(*) n FROM telegram_outbox').first();
-  const routes=['products/loza-002','products/loza-002/availability','orders/LEGACY-1/status','telegram/settings','telegram/test','telegram/retry','catalog/preview','catalog/import'];
+  const routes=['products/loza-002','products/loza-002/availability','orders/LEGACY-1/status','orders/LEGACY-1/payment','telegram/settings','telegram/test','telegram/retry','catalog/preview','catalog/import'];
   for(const route of routes){
     for(const options of [{auth:null},{auth:'untrusted-jwt'},{auth:await jwt({email:'outsider@example.test'})},{csrfToken:''},{headers:{Origin:'https://evil.test'}}]){
       const response=await request('/api/admin/'+route,{data:{},...options});assert.equal(response.status,403,route);assert.match(response.headers.get('Cache-Control'),/no-store/);
@@ -193,6 +194,39 @@ test('order commit queues one message; concurrent replay never creates duplicate
   const text=sent.find(x=>x.text.includes(orderId))?.text;assert.ok(text);assert.match(text,/× 2/);assert.match(text,/300.00 грн/);assert.match(text,/Передоплата 100 грн|передоплата 100 грн/);assert.match(text,/Оплата: не перевірена/);
   for(const pii of ['Preview Buyer','380991234567','Preview City','Private delivery','Private comment'])assert.ok(!text.includes(pii));
   assert.equal(sent.filter(x=>x.text.includes(orderId)).length,1);
+});
+test('payment ledger: new order starts unpaid; admin alone can report, manually verify and audit the advance independently',async()=>{
+  const response=await json('/api/orders/create',{data:{...checkout,paymentVerified:true}});
+  assert.equal(response.status,201);
+  const id=response.data.orderId;
+  const detail=await json('/api/admin/orders/'+id);
+  assert.equal(detail.status,200);
+  assert.equal(detail.data.paymentReady,true);
+  assert.deepEqual(detail.data.paymentTerms,{mode:'deposit_cod',advanceKop:10000,codKop:20000});
+  assert.equal(detail.data.payment.state,'awaiting');
+  assert.equal(detail.data.payment.version,0);
+  const listed=await json('/api/admin/orders?status=&q=&offset=0');
+  assert.equal(listed.data.paymentReady,true);
+  assert.equal(listed.data.orders.find(o=>o.id===id).payment_state,'awaiting');
+  // Buyer-supplied "paymentVerified" never changes the server's verified state.
+  assert.equal((await db.prepare('SELECT state FROM loza_payment_states WHERE order_id=?').bind(id).first()).state,'awaiting');
+  assert.equal((await json('/api/admin/orders/'+id+'/payment',{auth:null,data:{version:0,state:'confirmed',confirmedAfterBankCheck:true}})).status,403);
+  assert.equal((await json('/api/admin/orders/'+id+'/payment',{data:{version:0,state:'confirmed',confirmedAfterBankCheck:false}})).status,400);
+  const key=crypto.randomUUID();
+  let r=await json('/api/admin/orders/'+id+'/payment',{data:{version:0,state:'reported'},key});
+  assert.equal(r.status,200);assert.equal(r.data.payment.state,'reported');assert.equal(r.data.payment.version,1);
+  r=await json('/api/admin/orders/'+id+'/payment',{data:{version:0,state:'reported'},key});
+  assert.equal(r.status,200);assert.equal(r.data.payment.version,1);
+  assert.equal((await json('/api/admin/orders/'+id+'/payment',{data:{version:0,state:'not_paid'}})).status,409);
+  const next=await json('/api/admin/orders/'+id+'/payment',{data:{version:1,state:'confirmed',confirmedAfterBankCheck:true}});
+  assert.equal(next.status,200);assert.equal(next.data.payment.version,2);assert.equal(next.data.payment.state,'confirmed');
+  const tracked=await db.prepare('SELECT * FROM loza_payment_states WHERE order_id=?').bind(id).first();
+  assert.equal(tracked.state,'confirmed');assert.equal(tracked.updated_by,admin);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM loza_payment_actions WHERE order_id=?').bind(id).first()).n,2);
+  const intact=await db.prepare('SELECT amount_kop,status FROM orders WHERE id=?').bind(id).first();
+  assert.deepEqual({amount:intact.amount_kop,status:intact.status},{amount:30000,status:'pending'});
+  const original=await db.prepare('SELECT comment FROM order_checkout WHERE order_id=?').bind(id).first();
+  assert.match(original.comment,/^\[LOZA_PAYMENT:deposit_cod\] /);
 });
 test('optimistic product updates reject stale versions and SQL injection is data',async()=>{
   const row=await db.prepare("SELECT p.*,v.version FROM products p JOIN admin_product_versions v ON v.product_id=p.id WHERE p.id='loza-002'").first();
