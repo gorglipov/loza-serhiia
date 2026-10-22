@@ -6,7 +6,8 @@ export const onRequest = context => endpoint(context, "GET", async context => {
   const result = await database.prepare(`SELECT p.id, p.name, p.price_kop, p.available, p.stock, p.is_demo, p.details_json,
     c.confirmed_price_kop, c.characteristics_confirmed,a.in_stock
     FROM products p JOIN product_catalog c ON c.product_id=p.id JOIN product_availability a ON a.product_id=p.id
-    WHERE p.is_demo=0 ORDER BY p.name COLLATE NOCASE`).all();
+    WHERE p.is_demo=0 AND p.price_kop IS NOT NULL AND p.price_kop > 0
+    ORDER BY p.name COLLATE NOCASE`).all();
   return json({ success: true, products: result.results.sort((a,b)=>a.name.localeCompare(b.name,'uk')).map(row => ({
     id: row.id, name: row.name, priceKop: row.price_kop,
     priceConfirmed: row.price_kop !== null && row.confirmed_price_kop === row.price_kop,
