@@ -126,11 +126,46 @@
     const rows=data.events.map(e=>{const retry=el('span');if(['retry','failed','uncertain'].includes(e.state))retry.append(button('Повторити',()=>saving(async()=>{let allowDuplicateRisk=false;if(e.state==='uncertain'){allowDuplicateRisk=confirm('Telegram міг уже отримати це повідомлення. Ви перевірили чат і погоджуєтеся на можливий дубль?');if(!allowDuplicateRisk)return;}await api('telegram/retry',{eventId:e.id,allowDuplicateRisk});await load();})));return[e.event_key,badge(e.state,eventLabels),e.attempts,e.last_error || '—',retry];});
     return[card,el('h2','Черга сповіщень'),table(['Подія','Стан','Спроб','Результат',''],rows)];
   }
+  async function mono(){
+    const data=await api('mono'),card=el('section',undefined,'card mono-intro');
+    card.append(el('p','ТІЛЬКИ PREVIEW · ТЕСТОВІ ДАНІ','eyebrow'),el('h2','Надходження під контролем'),
+      el('p','Живе підключення до monobank заблоковане. Тут можна перевірити роботу на синтетичних транзакціях. Реальних переказів і приймання платежів немає.','hint'),
+      el('p','Збіг суми й часу — лише підказка. Замовлення не отримує статус «оплачено» автоматично.','hint'));
+    if(!data.schemaReady){card.append(el('p','Потрібна міграція 0006 для окремої Preview D1. Решта магазину працює без неї.','muted'));return[card];}
+    if(data.mode!=='fixture'){card.append(el('p','Моніторинг у цьому середовищі вимкнений.','muted'));return[card];}
+    const actions=el('div',undefined,'actions');actions.append(button('Перевірити тестові надходження',()=>saving(async()=>{await api('mono/sync',{});await load();return 'Тестову виписку перевірено. Реальних банківських запитів не було.';}),true));
+    actions.append(button(data.settings.notifications_enabled?'Вимкнути тестові сповіщення':'Увімкнути тестові сповіщення',()=>saving(async()=>{
+      if(!data.settings.notifications_enabled && !confirm('Увімкнути надсилання синтетичних надходжень у ваш Telegram? Повідомлення матимуть позначку ТЕСТ.'))return;
+      await api('mono/settings',{version:data.settings.version,enabled:!data.settings.notifications_enabled});await load();
+    })),button('Надіслати заплановані тести',()=>saving(async()=>{await api('mono/retry',{});await load();})));
+    card.append(actions,el('p','Оновлення — не частіше разу на хвилину. Telegram за замовчуванням вимкнений для цього модуля.','muted'));
+    const states={unverified:'Не перевірено',verified:'Перевірено · тест',held:'Утримання коштів',mismatch:'Розбіжність із webhook',not_found:'Не знайдено у цьому періоді',excluded:'Не є гривневим надходженням'};
+    const timestamp=value=>value?new Date(value*1000).toLocaleString('uk-UA'):'Немає підтвердженого часу';
+    const rows=data.transactions.map(t=>{
+      const matching=el('div');matching.append(el('span',t.candidates.length?`Можливих збігів: ${t.candidates.length}${t.moreCandidates?'+':''}`:'Збігів немає'));
+      if(t.candidates.length)matching.append(button('Переглянути збіги',()=>{
+        openEditor('Можливі збіги · тест');$('editorBody').append(el('p','Це синтетичні записи для навчання. Вони не є замовленнями покупців. Зарахування на особистий рахунок не доводить оплату конкретного замовлення.','hint'),
+          table(['Номер','Сума','Статус'],t.candidates.map(o=>[o.id,money(o.amount_kop),labels[o.status] || o.status])));
+      }));
+      const amount=t.currencyCode===980?money(t.amountKop):(t.amountKop/100).toFixed(2)+' · код '+t.currencyCode;
+      return[t.id.slice(0,8),timestamp(t.time),amount,badge(t.verificationState,states),matching];
+    });
+    const notifications=data.notifications.map(e=>{
+      const control=el('span');if(['retry','failed','uncertain'].includes(e.state))control.append(button('Повторити',()=>saving(async()=>{
+        let allowDuplicateRisk=false;if(e.state==='uncertain'){allowDuplicateRisk=confirm('Спочатку перевірте Telegram. Повтор може створити дубль. Продовжити?');if(!allowDuplicateRisk)return;}
+        await api('mono/retry',{eventId:e.id,allowDuplicateRisk});await load();
+      })));return[e.transaction_ref.slice(0,8),badge(e.state,eventLabels),e.attempts,e.last_error || '—',control];
+    });
+    return[card,el('h2','Тестові транзакції'),table(['Запис','Час','Сума','Перевірка','Замовлення'],rows),
+      el('h2','Telegram про надходження'),table(['Запис','Стан','Спроб','Результат',''],notifications),
+      el('h2','Останні перевірки'),table(['Час','Стан','Результат'],data.runs.map(r=>[timestamp(r.started_at),r.state,r.error_code || '—'])),
+      el('h2','Історія налаштувань'),table(['Час','Адміністратор','Дія'],data.actions.map(a=>[date(a.created_at),a.actor,a.action]))];
+  }
   async function load() {
     const id=++loadId;content.setAttribute('aria-busy','true');
-    try{const nodes=await ({dashboard,products,orders,audit,telegram}[view])();if(id===loadId)content.replaceChildren(...nodes);}catch(error){notice(error.message,true);}finally{if(id===loadId)content.setAttribute('aria-busy','false');}
+    try{const nodes=await ({dashboard,products,orders,audit,telegram,mono}[view])();if(id===loadId)content.replaceChildren(...nodes);}catch(error){notice(error.message,true);}finally{if(id===loadId)content.setAttribute('aria-busy','false');}
   }
-  document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>{view=b.dataset.view;offset=0;$('notice').hidden=true;document.querySelectorAll('[data-view]').forEach(x=>x.removeAttribute('aria-current'));b.setAttribute('aria-current','page');$('pageTitle').textContent={dashboard:'Огляд магазину',products:'Товари та наявність',orders:'Замовлення',audit:'Історія змін',telegram:'Telegram-сповіщення'}[view];load();}));
+  document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>{view=b.dataset.view;offset=0;$('notice').hidden=true;document.querySelectorAll('[data-view]').forEach(x=>x.removeAttribute('aria-current'));b.setAttribute('aria-current','page');$('pageTitle').textContent={dashboard:'Огляд магазину',products:'Товари та наявність',orders:'Замовлення',audit:'Історія змін',telegram:'Telegram-сповіщення',mono:'Моніторинг надходжень'}[view];load();}));
   $('closeEditor').addEventListener('click',()=>{if(!busy)dialog.close();});dialog.addEventListener('cancel',e=>{if(busy)e.preventDefault();});
   api('session').then(data=>{csrf=data.csrfToken;$('identity').textContent=data.email;return load();}).catch(error=>{content.replaceChildren(el('p','Доступ закрито до налаштування Cloudflare Access.'));content.setAttribute('aria-busy','false');notice(error.message,true);});
 })();
