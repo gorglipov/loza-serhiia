@@ -1,6 +1,7 @@
 // Runs the real compiled Pages worker + isolated Miniflare D1. No remote DB/bot.
 import {test,before,beforeEach,after} from 'node:test';
 import assert from 'node:assert/strict';
+import {paymentBreakdown,normalizeOrder} from '../server/checkout.js';
 import {readFile} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
 import {webcrypto} from 'node:crypto';
@@ -170,14 +171,26 @@ test('migration is repeatable and preserves legacy orders and bank events',async
   assert.ok(search.data.products.some(p=>p.name==='Аватар'));
 });
 let orderId;
-const checkout={items:[{productId:'loza-002',quantity:2}],customer:{name:'Preview Buyer',phone:'+380991234567'},delivery:{city:'Preview City',method:'nova_poshta',branch:'Private delivery 55'},comment:'Private comment',turnstileToken:'isolated-fixture'};
+const checkout={items:[{productId:'loza-002',quantity:2}],customer:{name:'Preview Buyer',phone:'+380991234567'},delivery:{city:'Preview City',method:'nova_poshta',branch:'Private delivery 55'},comment:'Private comment',payment:{mode:'deposit_cod'},turnstileToken:'isolated-fixture'};
+test('payment options use trusted integer kopecks and reject invalid deposit amounts',()=>{
+  assert.deepEqual(paymentBreakdown(15000,'deposit_cod'),{mode:'deposit_cod',advanceKop:10000,codKop:5000});
+  assert.deepEqual(paymentBreakdown(15000,'full'),{mode:'full',advanceKop:15000,codKop:0});
+  assert.deepEqual(paymentBreakdown(10000,'deposit_cod'),{mode:'deposit_cod',advanceKop:10000,codKop:0});
+  assert.throws(()=>paymentBreakdown(9900,'deposit_cod'),/100 грн/);
+  assert.throws(()=>paymentBreakdown(15000,'unknown'),/оплати/);
+  assert.equal(normalizeOrder(checkout).payment.mode,'deposit_cod');
+  assert.throws(()=>normalizeOrder({...checkout,payment:{mode:'invalid'}}),/Оберіть/);
+});
 test('order commit queues one message; concurrent replay never creates duplicate orders/events',async()=>{
-  const key=crypto.randomUUID();const response=await json('/api/orders/create',{data:{...checkout,amountKop:1},key});assert.equal(response.status,201);orderId=response.data.orderId;assert.equal(response.data.amountKop,30000);
+  const key=crypto.randomUUID();const response=await json('/api/orders/create',{data:{...checkout,amountKop:1},key});assert.equal(response.status,201);orderId=response.data.orderId;assert.equal(response.data.amountKop,30000);assert.deepEqual(response.data.payment,{mode:'deposit_cod',advanceKop:10000,codKop:20000});assert.equal(response.data.paymentVerified,false);
   await Promise.all([json('/api/orders/create',{data:checkout,key}),json('/api/orders/create',{data:checkout,key})]);await settle();
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM order_checkout').first()).n,1);
+  const savedPayment=await db.prepare('SELECT comment FROM order_checkout WHERE order_id=?').bind(orderId).first();
+  assert.match(savedPayment.comment,/^\\[LOZA_PAYMENT:deposit_cod\\] /);
+  assert.ok(savedPayment.comment.endsWith('Private comment'));
   assert.equal((await db.prepare("SELECT COUNT(*) n FROM telegram_outbox WHERE order_id=?").bind(orderId).first()).n,1);
   const event=await db.prepare('SELECT state,message_id FROM telegram_outbox WHERE order_id=?').bind(orderId).first();assert.equal(event.state,'sent');
-  const text=sent.find(x=>x.text.includes(orderId))?.text;assert.ok(text);assert.match(text,/× 2/);assert.match(text,/300.00 грн/);
+  const text=sent.find(x=>x.text.includes(orderId))?.text;assert.ok(text);assert.match(text,/× 2/);assert.match(text,/300.00 грн/);assert.match(text,/Передоплата 100 грн|передоплата 100 грн/);assert.match(text,/Оплата: не перевірена/);
   for(const pii of ['Preview Buyer','380991234567','Preview City','Private delivery','Private comment'])assert.ok(!text.includes(pii));
   assert.equal(sent.filter(x=>x.text.includes(orderId)).length,1);
 });
