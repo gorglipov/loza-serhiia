@@ -41,7 +41,11 @@ $lozaWrangler = "C:\Users\rigam\AppData\Local\npm-cache\_npx\32026684e21afda6\no
 
 ## 2. Cloudflare Access
 
-Створіть **Self-hosted application** у Cloudflare Zero Trust → Access → Applications. Використовуйте стабільний Preview hostname гілки з PR. Для захисту магазину потрібні обидві групи шляхів на тому самому hostname:
+Для поточного `*.pages.dev` почніть із **Pages → Settings → Enable access policy → Manage**: Cloudflare створить Access application для Preview. Змініть його Allow policy на точний email власника та візьміть AUD саме з нього. Для першого тестування можна залишити захист усього Preview hostname: це охоплює і HTML, і API. **Не видаляйте wildcard заради Preview** — у процедурі Cloudflare це використовується для окремого захисту production `pages.dev`. [Офіційна інструкція Pages Access](https://developers.cloudflare.com/pages/platform/known-issues/#enable-access-on-your-pagesdev-domain).
+
+Якщо налаштовуєте окремий захист шляхів через **Self-hosted application** у Cloudflare Zero Trust → Access → Applications, використовуйте стабільний Preview hostname гілки з PR. Потрібні обидві групи шляхів на тому самому hostname:
+
+Preview цієї гілки: `codex-admin-telegram.loza-serhiia.pages.dev` ([відкрити](https://codex-admin-telegram.loza-serhiia.pages.dev)).
 
 - `/admin`, `/admin/*`;
 - `/api/admin`, `/api/admin/*`.
