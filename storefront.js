@@ -126,6 +126,25 @@
     $("#varietySuggestions").innerHTML = query ? products.filter(product => product.name.toLocaleLowerCase("uk").startsWith(query)).slice(0, 10).map(product => `<option value="${esc(product.name)}"></option>`).join("") : "";
   }
 
+  const paymentRadio = () => document.querySelector('input[name="paymentMode"]:checked');
+  function renderPaymentBreakdown() {
+    const total = Number.isSafeInteger(quoted?.amountKop) ? quoted.amountKop : null;
+    const depositOption = document.querySelector('input[name="paymentMode"][value="deposit_cod"]');
+    depositOption.disabled = total !== null && total < 10000;
+    if (depositOption.disabled && depositOption.checked) depositOption.checked = false;
+    const method = paymentRadio()?.value;
+    $("#storePaymentTotal").textContent = total === null ? "—" : price(total);
+    $("#storeAdvance").textContent = total === null || !method ? "—" : price(method === "full" ? total : 10000);
+    $("#storeCod").textContent = total === null || !method ? "—" : price(method === "full" ? 0 : total - 10000);
+    $("#storePaymentInfo").textContent = depositOption.disabled
+      ? "Для замовлень менше 100 грн доступна лише повна передоплата."
+      : method === "deposit_cod"
+        ? "100 грн — погоджена передоплата; решта — післяплата при отриманні. Доставка й комісії не включені."
+        : method === "full" ? "Суму товарів потрібно узгодити з продавцем. Оплата на сайті вимкнена."
+        : "Оберіть умови оплати, щоб побачити розрахунок.";
+  }
+  document.querySelectorAll('input[name="paymentMode"]').forEach(input => input.addEventListener("change", () => { renderPaymentBreakdown(); updateControls(); }));
+
   function updateControls() {
     const empty = !cart.length;
     $("#cartCount").textContent = String(cart.reduce((sum, item) => sum + item.quantity, 0));
@@ -136,7 +155,8 @@
     $("#storeRecovery").hidden = !pending || receiptShown;
     $("#storeRecoverButton").disabled = recovering || inFlight;
     $("#storeFields").disabled = inFlight || Boolean(pendingPayload);
-    $("#storeSubmit").disabled = inFlight || recovering || !config?.checkoutAvailable || !token || (!pending && (!quoted || quoteLoading));
+    $("#storeSubmit").disabled = inFlight || recovering || !config?.checkoutAvailable || !token || (!pending && (!quoted || quoteLoading || !paymentRadio()));
+    renderPaymentBreakdown();
     $("#storeSubmit").textContent = inFlight ? "Створюємо замовлення…" : pending ? "Повторити надсилання" : "Оформити замовлення";
     $("#storeTotal").textContent = quoted ? price(quoted.amountKop) : quoteLoading ? "Розраховуємо…" : "—";
     $("#storeRefreshQuote").hidden = !cart.length || receiptShown || Boolean(quoted) || quoteLoading || Boolean(pending);
@@ -264,6 +284,12 @@
     $("#storeOrderNumber").textContent = data.orderId;
     $("#storeOrderAmount").textContent = price(data.amountKop);
     $("#storeOrderStatus").textContent = data.status === "pending" ? "Очікує підтвердження" : "Статус оновлено продавцем";
+    const payment = data.payment || {};
+    $("#storeReceiptPayment").textContent = payment.mode === "deposit_cod"
+      ? "Обрано: 100 грн передоплати + " + price(payment.codKop) + " післяплатою. Оплата ще не підтверджена."
+      : payment.mode === "full"
+        ? "Обрано: повна передоплата " + price(payment.advanceKop) + ". Оплата ще не підтверджена."
+        : "Умови оплати уточнюються з продавцем.";
     const latest = readCart();
     // Remove purchased quantities only; other tabs may have added more items.
     cart = latest.length ? latest : cart;
@@ -411,6 +437,7 @@
     event.preventDefault();
     if (inFlight || recovering || receiptShown) return;
     if (!$("#storeForm").reportValidity()) return;
+    if (!paymentRadio()) { feedback("Оберіть умови оплати.", "error"); return; }
     if (!pendingPayload && (!$("#storeCityRef").value || !$("#storeBranchRef").value)) {
       feedback("Оберіть місто або село та відділення зі списків Нової пошти.", "error");
       (!$("#storeCityRef").value ? $("#storeCity") : $("#storeBranch")).focus();
@@ -423,6 +450,7 @@
       customer: { name: $("#storeBuyer").value.trim(), phone: $("#storePhone").value.trim() },
       delivery: { city: $("#storeCity").value.trim(), method: $("#storeDelivery").value, branch: $("#storeBranch").value.trim() },
       comment: $("#storeComment").value.trim(),
+      payment: { mode: paymentRadio()?.value || "" },
     };
     pending ||= { key: makeKey(), items: input.items.map(item => ({ ...item })) };
     pendingPayload = input;
