@@ -81,12 +81,28 @@ before(async()=>{
 after(async()=>{if(mf)await mf.dispose();});
 beforeEach(async()=>{await db.prepare('DELETE FROM checkout_rate_limits').run();});
 
-test('all 107 PDF rows, 84 exact prices and 28 kishmish markers survive; unconfirmed prices cannot be bought',async()=>{
+test('public catalog hides 23 unpriced varieties while admin retains all 107; unconfirmed prices cannot be bought',async()=>{
   const source=JSON.parse(await readFile(new URL('server/catalog-source.json',root),'utf8'));
   const response=await json('/api/products',{auth:null});assert.equal(response.status,200);
-  const catalog=response.data.products;assert.equal(catalog.length,107);
-  assert.equal(catalog.filter(p=>p.priceKop!==null).length,84);assert.equal(catalog.filter(p=>p.details.kishmish).length,28);
-  for(const expected of source){const p=catalog.find(p=>p.id===expected.id);assert.ok(p);assert.equal(p.name,expected.name);assert.deepEqual(p.details,expected.details);assert.equal(p.priceKop,expected.priceKop);assert.equal(p.priceConfirmed,false);assert.equal(p.available,false);assert.equal(p.stock,0);}
+  const catalog=response.data.products;
+  const priced=source.filter(p=>p.priceKop!==null && p.priceKop>0);
+  assert.equal(source.length,107);
+  assert.equal(priced.length,84);
+  assert.equal(catalog.length,priced.length);
+  assert.ok(catalog.every(p=>p.priceKop!==null && p.priceKop>0));
+  assert.equal(catalog.filter(p=>p.details.kishmish).length,priced.filter(p=>p.details.kishmish).length);
+  const adminCatalog=(await json('/api/admin/products')).data.products;
+  assert.equal(adminCatalog.length,107);
+  for(const expected of source){
+    const p=catalog.find(p=>p.id===expected.id);
+    const admin=adminCatalog.find(p=>p.id===expected.id);
+    assert.ok(admin,"Admin must retain "+expected.id);
+    assert.equal(admin.price_kop,expected.priceKop);
+    if(expected.priceKop===null){assert.equal(p,undefined,"Unpriced products must stay hidden publicly");continue;}
+    assert.ok(p);assert.equal(p.name,expected.name);assert.deepEqual(p.details,expected.details);
+    assert.equal(p.priceKop,expected.priceKop);assert.equal(p.priceConfirmed,false);
+    assert.equal(p.available,false);assert.equal(p.stock,0);
+  }
   for(const id of ['grape-demo','loza-001','loza-002'])assert.equal((await json('/api/cart/quote',{auth:null,data:{items:[{productId:id,quantity:1}]}})).status,409);
   await assert.rejects(db.prepare("UPDATE products SET available=1,stock=10 WHERE id='loza-002'").run(),/LOZA_(PRICE_NOT_CONFIRMED|MANUAL_STOCK)/);
   const products=(await json('/api/admin/products')).data.products;
@@ -271,6 +287,9 @@ test('CSV full 107-row import is atomic, audited and replay safe; preserves sour
   const replay=await json('/api/admin/catalog/import',{data:payload,key});assert.equal(replay.status,200);assert.equal(replay.data.replayed,true);
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM admin_audit_log').first()).n,before+107);
   const quote=await json('/api/cart/quote',{auth:null,data:{items:[{productId:'loza-001',quantity:2}],priceKop:1}});assert.equal(quote.status,200);assert.equal(quote.data.amountKop,24690);
+  // Once an administrator sets a price, the previously hidden variety reappears automatically.
+  const publicCatalog=(await json('/api/products',{auth:null})).data.products;
+  assert.equal(publicCatalog.find(p=>p.id==='loza-001')?.priceKop,12345);
   const row=await db.prepare("SELECT source_json FROM product_catalog WHERE product_id='loza-001'").first();assert.equal(JSON.parse(row.source_json).priceKop,null);
   await apply('migrations/0005_manual_availability.sql');assert.equal((await db.prepare("SELECT price_kop,stock FROM products WHERE id='loza-001'").first()).price_kop,12345);
   assert.equal((await db.prepare("SELECT COUNT(*) n FROM orders WHERE id='LEGACY-1'").first()).n,1);assert.equal((await db.prepare('SELECT COUNT(*) n FROM mono_events').first()).n,1);
@@ -312,15 +331,23 @@ test('catalog cards, search, all filters and cart work without photos on desktop
   const {chromium}=await import(pathToFileURL(process.env.LOZA_PLAYWRIGHT_MODULE).href),browser=await chromium.launch({channel:'msedge',headless:true});
   try{for(const width of [1440,390,320]){
     const page=await browser.newPage({viewport:{width,height:900},reducedMotion:'reduce'}),errors=[];page.on('pageerror',error=>errors.push(error.message));
-    await page.goto((await mf.ready).origin+'/');await page.waitForFunction(()=>document.querySelectorAll('#grid article').length===107);
-    assert.equal(await page.locator('#grid img,#grid picture,#grid canvas').count(),0);assert.equal(await page.locator('.kishmish-badge').count(),28);
+    const visible=(await json('/api/products',{auth:null})).data.products;
+    await page.goto((await mf.ready).origin+'/');
+    await page.waitForFunction(expected=>document.querySelectorAll('#grid article').length===expected,visible.length);
+    assert.equal(await page.locator('#grid img,#grid picture,#grid canvas').count(),0);
+    assert.equal(await page.locator('.kishmish-badge').count(),visible.filter(p=>p.details.kishmish).length);
     assert.ok(await page.getByText('Немає в наявності',{exact:true}).count()>0);
-    await page.locator('#search').fill('Академік');assert.equal(await page.locator('.catalog-price .price').innerText(),'Ціну уточнюйте');
-    assert.equal(await page.getByRole('button',{name:'Замовлення недоступне',exact:true}).isEnabled(),false);
-    assert.equal(((await page.locator('#grid').innerText()).match(/Немає в наявності/g)||[]).length,1);await page.locator('#resetFilters').click();
+    await page.locator('#search').fill('Академік');
+    assert.equal(await page.locator('#grid article').count(),0);
+    assert.equal(await page.locator('#varietySuggestions option[value="Академік"]').count(),0);
+    await page.locator('#resetFilters').click();
     await page.locator('#search').fill('Алвіка');assert.equal(await page.locator('#grid article').count(),1);await page.locator('#resetFilters').click();
-    await page.locator('#kishmish').selectOption('1');assert.equal(await page.locator('#grid article').count(),28);await page.locator('#resetFilters').click();
-    await page.locator('#ripening').selectOption('ранньо-середній');assert.equal(await page.locator('#grid article').count(),13);await page.locator('#resetFilters').click();
+    await page.locator('#kishmish').selectOption('1');
+    assert.equal(await page.locator('#grid article').count(),visible.filter(p=>p.details.kishmish).length);
+    await page.locator('#resetFilters').click();
+    await page.locator('#ripening').selectOption('ранньо-середній');
+    assert.equal(await page.locator('#grid article').count(),visible.filter(p=>p.details.ripening?.toLocaleLowerCase('uk')==='ранньо-середній').length);
+    await page.locator('#resetFilters').click();
     await page.locator('#color').selectOption('темно-синій');assert.ok(await page.locator('#grid article').count()>0);assert.ok(await page.locator('#grid article').count()<107);await page.locator('#resetFilters').click();
     await page.locator('#priceMin').fill('120');await page.locator('#priceMax').fill('150');assert.ok(await page.locator('#grid article').count()>0);await page.locator('#resetFilters').click();
     await page.locator('#search').fill('Абажур');await page.getByRole('button',{name:'Додати до кошика',exact:true}).click();await page.locator('#openCart').click();await page.locator('#storeBuyer').waitFor();
@@ -341,7 +368,9 @@ test('manual switch works without a price; edits are audited, versioned and idem
   const id='loza-003',original=await adminProduct(id),key=crypto.randomUUID(),input={version:original.version,inStock:true};
   const before=(await db.prepare('SELECT COUNT(*) n FROM admin_audit_log WHERE target=?').bind(id).first()).n;
   assert.equal((await json('/api/admin/products/'+id+'/availability',{data:input,key})).status,200);
-  let p=(await json('/api/products',{auth:null})).data.products.find(p=>p.id===id);assert.equal(p.inStock,true);assert.equal(p.available,false);assert.equal(p.priceKop,null);assert.equal(p.stock,20);
+  // Unpriced varieties do not leak back to the public catalog when their availability is toggled.
+  assert.equal((await json('/api/products',{auth:null})).data.products.find(p=>p.id===id),undefined);
+  let p=await adminProduct(id);assert.equal(p.inStock,true);assert.equal(p.available,false);assert.equal(p.price_kop,null);assert.equal(p.stock,20);
   assert.equal((await json('/api/cart/quote',{data:{items:[{productId:id,quantity:1}]}})).status,409);
   const {parseCsv}=await import('../server/catalog.js');const csv=await exported(),row=parseCsv(csv).find(p=>p.product_id===id);assert.equal(row.available,'1');assert.equal(row.price_uah,'');assert.ok(!Object.hasOwn(row,'stock'));
   assert.equal((await json('/api/admin/catalog/preview',{data:{csv}})).status,200);
