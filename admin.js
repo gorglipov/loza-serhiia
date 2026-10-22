@@ -61,7 +61,7 @@
   async function editOrder(id) {
     try{
       const {order:o,items}=await api('orders/'+encodeURIComponent(id));openEditor('Замовлення');
-      const dl=el('dl',undefined,'detail');for(const [label,value]of [['Номер',o.id],['Дата',date(o.created_at)],['Сума',money(o.amount_kop)],['Покупець',o.buyer_name],['Телефон',o.phone],['Доставка',[o.city,o.delivery_method==='nova_poshta'?'Нова пошта':o.delivery_method==='ukrposhta'?'Укрпошта':'',o.delivery_branch].filter(Boolean).join(' · ')],['Коментар',o.comment || '—']])dl.append(el('dt',label),el('dd',value || '—'));
+      const dl=el('dl',undefined,'detail');for(const [label,value]of [['Номер',o.id],['Дата',date(o.created_at)],['Сума',money(o.amount_kop)],['Покупець',o.buyer_name],['Телефон',o.phone],['Доставка',[o.city,o.delivery_method==='nova_poshta'?'Нова пошта':o.delivery_method==='ukrposhta'?'Укрпошта':'',o.delivery_branch].filter(Boolean).join(' · ')],['Умови оплати',/^\[LOZA_PAYMENT:deposit_cod\] /.test(o.comment||'') ? 'Передоплата 100 грн, післяплата '+money(Math.max(0,o.amount_kop-10000)) : /^\[LOZA_PAYMENT:full\] /.test(o.comment||'') ? 'Повна передоплата '+money(o.amount_kop) : 'Не обрано (старе замовлення)'],['Переказ','Не підтверджено'],['Коментар',(o.comment||'').replace(/^\[LOZA_PAYMENT:(?:full|deposit_cod)\] /,'') || '—']])dl.append(el('dt',label),el('dd',value || '—'));
       $('editorBody').append(dl,table(['Товар','Кількість','Сума'],items.map(i=>[i.product_name,i.quantity,money(i.line_total_kop)])));
       const form=el('form'),label=el('label','Статус замовлення'),select=el('select');
       const next={pending:['confirmed','cancelled'],confirmed:['shipped','cancelled'],shipped:['completed']}[o.status] || [];
