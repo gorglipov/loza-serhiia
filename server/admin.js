@@ -113,7 +113,7 @@ export async function adminApi(context) {
       const paymentColumn=ready?'ps.state AS payment_state':'NULL AS payment_state';
       const paymentJoin=ready?'LEFT JOIN loza_payment_states ps ON ps.order_id=o.id':'';
       const rows=await database.prepare(`SELECT o.id,o.amount_kop,o.status,c.created_at,v.version,${paymentColumn},
-        (SELECT json_group_array(json_object('name',product_name,'quantity')) FROM order_items i WHERE i.order_id=o.id) items
+        (SELECT json_group_array(json_object('name',product_name,'quantity',quantity)) FROM order_items i WHERE i.order_id=o.id) items
         FROM orders o LEFT JOIN order_checkout c ON c.order_id=o.id JOIN admin_order_versions v ON v.order_id=o.id ${paymentJoin}
         WHERE (?='' OR o.status=?) AND instr(o.id,?)>0 ORDER BY c.created_at DESC,o.rowid DESC LIMIT 51 OFFSET ?`).bind(status,status,q,offset).all();
       return json({success:true,orders:rows.results.slice(0,50).map(r=>({...r,items:JSON.parse(r.items)})),hasMore:rows.results.length>50,paymentReady:ready});
