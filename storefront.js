@@ -5,7 +5,8 @@
   const price = kop => Number.isSafeInteger(kop) ? money.format(kop / 100) : "Ціну уточнюйте";
   const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
   const MAX_QUANTITY = 20;
-  const limitFor = product => Math.min(MAX_QUANTITY, Math.max(0, Number.isSafeInteger(product?.stock) ? product.stock : 0));
+  const MAX_ORDER_QUANTITY = 100;
+  const quantityLimitReached = quantity => quantity >= MAX_QUANTITY || cart.reduce((sum,item)=>sum+item.quantity,0) >= MAX_ORDER_QUANTITY;
   const CART_KEY = "loza-cart-v2", PENDING_KEY = "loza-checkout-pending-v2";
   const timeoutSignal = milliseconds => {
     if (typeof AbortSignal.timeout === "function") return AbortSignal.timeout(milliseconds);
@@ -120,8 +121,8 @@
         <p class="catalog-review">${product.characteristicsConfirmed ? "Характеристики підтверджено власником" : "Характеристики з каталогу · потребують перевірки"}</p>
         <div class="catalog-price"><strong class="price">${esc(price(product.priceKop))}</strong>${product.priceKop !== null ? '<span>за лозу</span>' : ""}</div>
         ${product.priceKop !== null && !product.priceConfirmed ? '<p class="catalog-price-note">Ціна з PDF · очікує підтвердження</p>' : ""}
-        <p class="store-stock${product.inStock && product.stock > 0 ? "" : " store-unavailable"}">${product.inStock && product.stock > 0 ? `В наявності · ${product.stock} лоз` : "Немає в наявності"}</p>
-        ${quantity ? `<div class="quantity-control"><button type="button" data-action="decrease" data-id="${esc(product.id)}" aria-label="Зменшити кількість ${esc(product.name)}" ${pending ? "disabled" : ""}>−</button><span><strong>${quantity}</strong><small>у кошику</small></span><button type="button" data-action="increase" data-id="${esc(product.id)}" aria-label="Збільшити кількість ${esc(product.name)}" ${pending || !available || quantity >= limitFor(product) ? "disabled" : ""}>+</button></div>` :
+        <p class="store-stock${product.inStock ? "" : " store-unavailable"}">${product.inStock ? "В наявності" : "Немає в наявності"}</p>
+        ${quantity ? `<div class="quantity-control"><button type="button" data-action="decrease" data-id="${esc(product.id)}" aria-label="Зменшити кількість ${esc(product.name)}" ${pending ? "disabled" : ""}>−</button><span><strong>${quantity}</strong><small>у кошику</small></span><button type="button" data-action="increase" data-id="${esc(product.id)}" aria-label="Збільшити кількість ${esc(product.name)}" ${pending || !available || quantityLimitReached(quantity) ? "disabled" : ""}>+</button></div>` :
           `<button class="add" type="button" data-action="increase" data-id="${esc(product.id)}" ${pending || !available ? "disabled" : ""}>${available ? "Додати до кошика" : product.priceKop === null ? "Замовлення недоступне" : !product.inStock ? "Замовлення недоступне" : !product.priceConfirmed ? "Ціна очікує підтвердження" : "Замовлення недоступне"}</button>`}
       </article>`;
     }).join("") : '<p class="store-load">За цими умовами товарів не знайдено.</p>';
@@ -149,13 +150,13 @@
     const byId = new Map((quoted?.lines || []).map(line => [line.productId, line]));
     $("#cartLines").innerHTML = cart.length ? cart.map(item => {
       const product = findProduct(item.productId), line = byId.get(item.productId);
-      const unavailable = !product?.inStock || !product?.available || !product?.priceConfirmed || item.quantity > limitFor(product);
+      const unavailable = !product?.inStock || !product?.available || !product?.priceConfirmed || item.quantity > MAX_QUANTITY;
       return `<div class="cartrow"><div><strong>${esc(product?.name || "Товар тимчасово недоступний")}</strong>
         <div class="hint">${esc(price(product?.priceKop))} за штуку</div>
-        ${unavailable ? '<div class="store-stock store-unavailable">Наявність, залишок або ціна змінилися. Скоригуйте кількість або приберіть сорт.</div>' : ""}
+        ${unavailable ? '<div class="store-stock store-unavailable">Наявність або ціна змінилася. Приберіть сорт або зверніться в підтримку.</div>' : ""}
         <div class="store-line-total">${line ? esc(price(line.lineTotalKop)) : quoteLoading ? "Розраховуємо…" : "—"}</div>
         <button class="remove" type="button" data-action="remove" data-id="${esc(item.productId)}" ${pending ? "disabled" : ""}>Прибрати</button></div>
-        <div class="qty"><button type="button" data-action="decrease" data-id="${esc(item.productId)}" aria-label="Зменшити кількість ${esc(product?.name || "товару")}" ${pending ? "disabled" : ""}>−</button><output aria-label="Кількість">${item.quantity}</output><button type="button" data-action="increase" data-id="${esc(item.productId)}" aria-label="Збільшити кількість ${esc(product?.name || "товару")}" ${pending || !product?.available || item.quantity >= limitFor(product) ? "disabled" : ""}>+</button></div></div>`;
+        <div class="qty"><button type="button" data-action="decrease" data-id="${esc(item.productId)}" aria-label="Зменшити кількість ${esc(product?.name || "товару")}" ${pending ? "disabled" : ""}>−</button><output aria-label="Кількість">${item.quantity}</output><button type="button" data-action="increase" data-id="${esc(item.productId)}" aria-label="Збільшити кількість ${esc(product?.name || "товару")}" ${pending || !product?.available || quantityLimitReached(item.quantity) ? "disabled" : ""}>+</button></div></div>`;
     }).join("") : '<div class="empty">Кошик поки порожній. Додайте товар із каталогу.</div>';
     updateControls();
   }
@@ -191,8 +192,8 @@
     if (pending || inFlight) return;
     const current = quantityOf(id), product = findProduct(id);
     const next = remove ? 0 : current + delta;
-    if (next > current && (!product?.available || next > limitFor(product) || (!current && cart.length >= 20))) {
-      toast("Не вдалося збільшити кількість", "До 20 лоз кожного сорту, у межах залишку, та до 20 різних сортів у кошику.");
+    if (next > current && (!product?.available || next > MAX_QUANTITY || cart.reduce((sum,item)=>sum+item.quantity,0)+1>MAX_ORDER_QUANTITY || (!current && cart.length >= 20))) {
+      toast("Не вдалося збільшити кількість", "До 20 лоз одного сорту та до 100 лоз загалом у замовленні. До 20 різних сортів.");
       return;
     }
     cart = cart.filter(item => item.productId !== id);
@@ -202,20 +203,7 @@
     if (next > current) toast("Додано до кошика", product.name);
   }
 
-  function loadTurnstile() {
-    if (window.turnstile) return Promise.resolve(window.turnstile);
-    if (turnstileLoading) return turnstileLoading;
-    turnstileLoading = new Promise((resolve, reject) => {
-      const script = document.createElement("script");
-      const timer = setTimeout(() => { script.remove(); turnstileLoading = null; reject(new Error("Не вдалося завантажити перевірку. Перевірте інтернет і відкрийте кошик знову.")); }, 15000);
-      window.lozaTurnstileReady = () => { clearTimeout(timer); resolve(window.turnstile); };
-      script.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=lozaTurnstileReady";
-      script.async = true;
-      script.onerror = () => { clearTimeout(timer); script.remove(); turnstileLoading = null; reject(new Error("Перевірка недоступна. Перевірте інтернет і відкрийте кошик знову.")); };
-      document.head.append(script);
-    });
-    return turnstileLoading;
-  }
+  function loadTurnstile() { return window.lozaLoadTurnstile(); }
 
   async function mountTurnstile() {
     if (!config?.checkoutAvailable || !cart.length || receiptShown) return;

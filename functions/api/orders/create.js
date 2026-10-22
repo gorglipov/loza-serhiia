@@ -23,7 +23,7 @@ export const onRequest = context => endpoint(context, "POST", async context => {
   const id = "LOZA-" + crypto.randomUUID();
   try {
     // batch is a transaction. The migration trigger validates, snapshots prices and
-    // checks availability and reserves stock once inside the same transaction.
+    // checks manual availability once inside the same transaction. No stock deduction.
     await database.batch([
       database.prepare(`INSERT INTO orders (id, amount_kop, status)
         SELECT ?, SUM(p.price_kop * json_extract(j.value, '$.quantity')), 'pending'

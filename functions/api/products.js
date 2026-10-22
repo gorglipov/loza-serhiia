@@ -12,7 +12,7 @@ export const onRequest = context => endpoint(context, "GET", async context => {
     priceConfirmed: row.price_kop !== null && row.confirmed_price_kop === row.price_kop,
     characteristicsConfirmed: Boolean(row.characteristics_confirmed),
     inStock: Boolean(row.in_stock),
-    available: Boolean(row.in_stock && row.stock > 0 && row.price_kop !== null && row.confirmed_price_kop === row.price_kop), stock: row.stock,
+    available: Boolean(row.in_stock && row.price_kop !== null && row.confirmed_price_kop === row.price_kop),
     isDemo: Boolean(row.is_demo), details: JSON.parse(row.details_json),
   })), maxQuantity: MAX_QUANTITY, paymentsEnabled: false });
 });

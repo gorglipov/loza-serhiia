@@ -2,6 +2,7 @@ import {body,db,endpoint,json,rateLimit,StoreError} from './checkout.js';
 import {issueCsrf} from './access.js';
 import {deliverPending,telegramConfigured,STATUS_LABELS} from './telegram.js';
 import {catalogApi} from './catalog.js';
+import {supportAdminApi} from './support.js';
 const invalid=()=>new StoreError('INVALID_ADMIN_INPUT','Перевірте введені значення.');
 const int=(v,max=100000000)=>Number.isSafeInteger(v) && v>=0 && v<=max;
 const clean=(v,min,max)=> {
@@ -9,7 +10,7 @@ const clean=(v,min,max)=> {
   v=v.normalize('NFC').trim(); if(v.length<min || v.length>max) throw invalid(); return v;
 };
 export function productInput(input) {
-  if(!int(input.version) || !int(input.stock,1000000) || !(input.priceKop===null || (int(input.priceKop) && input.priceKop>0)) ||
+  if(!int(input.version) || Object.hasOwn(input,'stock') || !(input.priceKop===null || (int(input.priceKop) && input.priceKop>0)) ||
     typeof input.available!=='boolean' || typeof input.priceConfirmed!=='boolean' || typeof input.characteristicsConfirmed!=='boolean' ||
     (input.priceConfirmed && input.priceKop===null) ||
     !input.details || typeof input.details!=='object' || Array.isArray(input.details)) throw invalid();
@@ -19,7 +20,7 @@ export function productInput(input) {
     if(key==='kishmish') { if(typeof input.details[key]!=='boolean') throw invalid(); details[key]=input.details[key]; }
     else details[key]=clean(input.details[key],0,500);
   }
-  return {name:clean(input.name,2,160),priceKop:input.priceKop,stock:input.stock,available:input.available?1:0,
+  return {name:clean(input.name,2,160),priceKop:input.priceKop,available:input.available?1:0,
     priceConfirmed:input.priceConfirmed?1:0,characteristicsConfirmed:input.characteristicsConfirmed?1:0,detailsJson:JSON.stringify(details)};
 }
 function commandId(request) {
@@ -43,7 +44,7 @@ async function mutate(database,request,actor,kind,target,version,payload) {
     throw error;
   }
 }
-function product(row) { const {details_json,source_json,in_stock,...data}=row; return {...data,inStock:Boolean(in_stock),details:JSON.parse(details_json),source:source_json?JSON.parse(source_json):null}; }
+function product(row) { const {details_json,source_json,in_stock,stock,...data}=row; return {...data,inStock:Boolean(in_stock),details:JSON.parse(details_json),source:source_json?JSON.parse(source_json):null}; }
 async function availability(database,request,actor,target,input) {
   if(!int(input.version) || typeof input.inStock!=='boolean')throw invalid();
   const id=commandId(request),state=input.inStock?1:0;
@@ -67,16 +68,17 @@ export async function adminApi(context) {
   return endpoint(context,method,async()=> {
     if(!context.data.admin) throw new StoreError('ADMIN_FORBIDDEN','Доступ заборонено.',403);
     const database=db(context);
-    const schema=await database.prepare("SELECT version FROM loza_store_migrations WHERE version='0007_stock_inventory'").first();
-    if(!schema) throw new StoreError('ADMIN_SCHEMA_REQUIRED','Спочатку застосуйте міграцію 0007 до D1 цього середовища.',503);
+    const schema=await database.prepare("SELECT version FROM loza_store_migrations WHERE version='0008_manual_catalog_support'").first();
+    if(!schema) throw new StoreError('ADMIN_SCHEMA_REQUIRED','Спочатку застосуйте міграцію 0008 до D1 цього середовища.',503);
     await rateLimit(context,database,'admin',method==='GET'?180:30);
     const url=new URL(context.request.url), route=url.pathname.replace(/^\/api\/admin\/?/,'').replace(/\/$/,'');
     const actor=context.data.admin.email;
+    if(route==='support' || route.startsWith('support/'))return supportAdminApi(context,database,route,actor,commandId);
     if(route.startsWith('catalog/')) return catalogApi(context,database,route,actor,productInput,commandId);
     if(method==='GET' && route==='session') return json({success:true,email:actor,csrfToken:await issueCsrf(context.request,context.env,context.data.admin),statuses:STATUS_LABELS});
     if(method==='GET' && route==='dashboard') {
       const [products,counts]=await Promise.all([
-        database.prepare('SELECT COUNT(*) total,SUM(CASE WHEN a.in_stock=1 AND p.stock>0 THEN 1 ELSE 0 END) active FROM products p LEFT JOIN product_availability a ON a.product_id=p.id WHERE p.is_demo=0').first(),
+        database.prepare('SELECT COUNT(*) total,SUM(CASE WHEN a.in_stock=1 THEN 1 ELSE 0 END) active FROM products p LEFT JOIN product_availability a ON a.product_id=p.id WHERE p.is_demo=0').first(),
         database.prepare('SELECT status,COUNT(*) count FROM orders GROUP BY status').all()
       ]);
       return json({success:true,products,orders:counts.results});
@@ -87,8 +89,8 @@ export async function adminApi(context) {
       const result=await database.prepare(`SELECT p.*,v.version,c.confirmed_price_kop,c.characteristics_confirmed,c.source_json,a.in_stock
         FROM products p JOIN admin_product_versions v ON v.product_id=p.id LEFT JOIN product_catalog c ON c.product_id=p.id
         LEFT JOIN product_availability a ON a.product_id=p.id
-        WHERE (p.is_demo=0 OR ?='demo') AND (?='all' OR (?='active' AND a.in_stock=1 AND p.stock>0) OR (?='inactive' AND (COALESCE(a.in_stock,0)=0 OR p.stock=0)) OR
-        (?='demo' AND p.is_demo=1) OR (?='empty' AND p.stock=0)) ORDER BY p.name`)
+        WHERE (p.is_demo=0 OR ?='demo') AND (?='all' OR (?='active' AND a.in_stock=1) OR (?='inactive' AND COALESCE(a.in_stock,0)=0) OR
+        (?='demo' AND p.is_demo=1) OR (?='empty' AND p.price_kop IS NULL)) ORDER BY p.name`)
         .bind(filter,filter,filter,filter,filter,filter).all();
       // SQLite lower() folds ASCII only. Fold Ukrainian names on the server.
       const needle=q.toLocaleLowerCase('uk');

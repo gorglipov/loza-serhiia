@@ -44,12 +44,12 @@ before(async()=>{
   const options={name:'loza',modules:true,script:await worker.text(),compatibilityDate:'2026-10-22',d1Databases:['DB'],bindings:env,
     serviceBindings:{ASSETS:async request=>{
       const path=new URL(request.url).pathname;
-      if(!['/','/index.html','/admin.js','/admin.css','/storefront.js','/storefront.css'].includes(path))return new Response('Not found',{status:404});
+      if(!['/','/index.html','/admin.js','/admin.css','/storefront.js','/storefront.css','/support.js','/turnstile-loader.js'].includes(path))return new Response('Not found',{status:404});
       const file=path==='/'?'index.html':path.slice(1);return new Response(await readFile(new URL(file,root)),{headers:{'Content-Type':file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':'text/html'}});
     }},outboundService:async request=>{
       const url=new URL(request.url);
       if(url.href===issuer+'/cdn-cgi/access/certs')return Response.json({keys:[jwk]});
-      if(url.hostname==='challenges.cloudflare.com')return Response.json({success:true,action:'loza_checkout',hostname:new URL(origin).hostname});
+      if(url.hostname==='challenges.cloudflare.com'){const input=await request.json();return Response.json({success:true,action:input.response==='support-fixture'?'loza_support':'loza_checkout',hostname:new URL(origin).hostname});}
       if(url.hostname==='api.telegram.org'){
         calls++;const payload=await request.json();sent.push(payload);
         if(telegramMode==='429')return Response.json({ok:false,error_code:429,parameters:{retry_after:1}},{status:429});
@@ -76,24 +76,24 @@ before(async()=>{
   await db.prepare("INSERT INTO orders(id,amount_kop,status) VALUES('LEGACY-CANCELLED',10000,'cancelled')").run();
   await db.prepare("INSERT INTO admin_stock_returns(order_id) VALUES('LEGACY-CANCELLED')").run();
   await apply('migrations/0005_manual_availability.sql');await apply('migrations/0005_manual_availability.sql');
-  await apply('migrations/0007_stock_inventory.sql');await apply('migrations/0007_stock_inventory.sql');
+  await apply('migrations/0007_stock_inventory.sql');await apply('migrations/0008_manual_catalog_support.sql');await apply('migrations/0008_manual_catalog_support.sql');
   token=await jwt();const session=await json('/api/admin/session');assert.equal(session.status,200);csrf=session.data.csrfToken;
 });
 after(async()=>{if(mf)await mf.dispose();});
-beforeEach(async()=>{await db.prepare('DELETE FROM checkout_rate_limits').run();});
+beforeEach(async()=>{telegramMode='ok';await db.prepare('DELETE FROM checkout_rate_limits').run();});
 
 test('all 107 PDF rows, 84 exact prices and 28 kishmish markers survive; unconfirmed prices cannot be bought',async()=>{
   const source=JSON.parse(await readFile(new URL('server/catalog-source.json',root),'utf8'));
   const response=await json('/api/products',{auth:null});assert.equal(response.status,200);
   const catalog=response.data.products;assert.equal(catalog.length,107);
   assert.equal(catalog.filter(p=>p.priceKop!==null).length,84);assert.equal(catalog.filter(p=>p.details.kishmish).length,28);
-  for(const expected of source){const p=catalog.find(p=>p.id===expected.id);assert.ok(p);assert.equal(p.name,expected.name);assert.deepEqual(p.details,expected.details);assert.equal(p.priceKop,expected.priceKop);assert.equal(p.priceConfirmed,false);assert.equal(p.available,false);assert.equal(p.stock,0);}
+  for(const expected of source){const p=catalog.find(p=>p.id===expected.id);assert.ok(p);assert.equal(p.name,expected.name);assert.deepEqual(p.details,expected.details);assert.equal(p.priceKop,expected.priceKop);assert.equal(p.priceConfirmed,false);assert.equal(p.available,false);assert.equal(Object.hasOwn(p,'stock'),false);}
   for(const id of ['grape-demo','loza-001','loza-002'])assert.equal((await json('/api/cart/quote',{auth:null,data:{items:[{productId:id,quantity:1}]}})).status,409);
   await assert.rejects(db.prepare("UPDATE products SET available=1,stock=10 WHERE id='loza-002'").run(),/LOZA_(PRICE_NOT_CONFIRMED|MANUAL_STOCK)/);
   const products=(await json('/api/admin/products')).data.products;
   for(const id of ['loza-002','loza-004']){
     const p=products.find(p=>p.id===id);
-    const input={version:p.version,name:p.name,priceKop:p.price_kop,stock:20,available:true,priceConfirmed:false,characteristicsConfirmed:false,details:p.details};
+    const input={version:p.version,name:p.name,priceKop:p.price_kop,available:true,priceConfirmed:false,characteristicsConfirmed:false,details:p.details};
     assert.equal((await json('/api/admin/products/'+id,{data:input})).status,200);
     assert.equal((await json('/api/cart/quote',{data:{items:[{productId:id,quantity:1}]}})).status,409);
     const version=(await db.prepare('SELECT version FROM admin_product_versions WHERE product_id=?').bind(id).first()).version;
@@ -102,7 +102,7 @@ test('all 107 PDF rows, 84 exact prices and 28 kishmish markers survive; unconfi
 });
 
 test('private HTML and every admin API fail closed without a verified Access JWT',async()=>{
-  for(const path of ['/admin','/admin/','/api/admin/session','/api/admin/orders','/api/admin/telegram']){
+  for(const path of ['/admin','/admin/','/api/admin/session','/api/admin/orders','/api/admin/telegram','/api/admin/support']){
     const r=await request(path,{auth:null});assert.equal(r.status,403,path);assert.match(r.headers.get('Cache-Control'),/no-store/);
   }
   for(const bad of [await jwt({email:'outsider@example.test'}),await jwt({aud:['b'.repeat(64)]}),await jwt({iss:'https://evil.test'}),await jwt({exp:1}),await jwt({}, {alg:'HS256'}),token.slice(0,-12)+'wrong']){
@@ -113,7 +113,7 @@ test('private HTML and every admin API fail closed without a verified Access JWT
 });
 test('every administrative mutation requires signed Access identity and CSRF before side effects',async()=>{
   const before=await db.prepare('SELECT COUNT(*) n FROM admin_mutations').first(),outbox=await db.prepare('SELECT COUNT(*) n FROM telegram_outbox').first();
-  const routes=['products/loza-002','products/loza-002/availability','orders/LEGACY-1/status','telegram/settings','telegram/test','telegram/retry','catalog/preview','catalog/import'];
+  const routes=['products/loza-002','products/loza-002/availability','orders/LEGACY-1/status','telegram/settings','telegram/test','telegram/retry','catalog/preview','catalog/import','support/SUP-00000000-0000-0000-0000-000000000000/status','support/SUP-00000000-0000-0000-0000-000000000000/retry'];
   for(const route of routes){
     for(const options of [{auth:null},{auth:'untrusted-jwt'},{auth:await jwt({email:'outsider@example.test'})},{csrfToken:''},{headers:{Origin:'https://evil.test'}}]){
       const response=await request('/api/admin/'+route,{data:{},...options});assert.equal(response.status,403,route);assert.match(response.headers.get('Cache-Control'),/no-store/);
@@ -136,7 +136,7 @@ test('public catalog, cart quote and checkout config work without monobank confi
 });
 test('client assets and private/public responses never contain server secret values',async()=>{
   const hidden=['ADMIN_CSRF_SECRET','CHECKOUT_SECURITY_KEY','TURNSTILE_SECRET_KEY','TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID'];
-  for(const path of ['/admin','/admin.js','/admin.css','/storefront.js','/storefront.css','/api/products','/api/store/config','/api/admin/session','/api/admin/dashboard','/api/admin/products','/api/admin/orders','/api/admin/audit','/api/admin/telegram']){
+  for(const path of ['/admin','/admin.js','/admin.css','/storefront.js','/storefront.css','/support.js','/turnstile-loader.js','/api/products','/api/store/config','/api/admin/session','/api/admin/dashboard','/api/admin/products','/api/admin/orders','/api/admin/audit','/api/admin/telegram','/api/admin/support']){
     const response=await request(path),text=await response.text();assert.equal(response.status,200,path);
     for(const key of hidden)assert.ok(!text.includes(env[key]),path+' exposed '+key);
     if(path.startsWith('/api/admin') || path==='/admin')assert.match(response.headers.get('Cache-Control'),/no-store/);
@@ -168,19 +168,19 @@ test('order commit queues one message; concurrent replay never creates duplicate
 });
 test('optimistic product updates reject stale versions and SQL injection is data',async()=>{
   const row=await db.prepare("SELECT p.*,v.version FROM products p JOIN admin_product_versions v ON v.product_id=p.id WHERE p.id='loza-002'").first();
-  const payload={version:row.version,name:"Grape'); DROP TABLE orders; --",priceKop:50000,priceConfirmed:true,characteristicsConfirmed:true,stock:row.stock,available:true,details:{...JSON.parse(row.details_json),color:'<img src=x onerror=alert(1)>'}};
+  const payload={version:row.version,name:"Grape'); DROP TABLE orders; --",priceKop:50000,priceConfirmed:true,characteristicsConfirmed:true,available:true,details:{...JSON.parse(row.details_json),color:'<img src=x onerror=alert(1)>'}};
   assert.equal((await json('/api/admin/products/loza-002',{data:payload})).status,200);
   assert.equal((await json('/api/admin/products/loza-002',{data:payload})).status,409);
   assert.equal((await json('/api/admin/products/loza-002',{data:{...payload,priceKop:0}})).status,400);
   assert.ok((await db.prepare('SELECT COUNT(*) n FROM orders').first()).n>=2);
 });
-test('cancellation restores reserved quantity once; stale changes are rejected',async()=>{
+test('cancellation and its replay never change availability or historical stock; stale changes are rejected',async()=>{
   const before=(await db.prepare("SELECT stock FROM products WHERE id='loza-002'").first()).stock;
   const version=(await db.prepare('SELECT version FROM admin_order_versions WHERE order_id=?').bind(orderId).first()).version;
   const key=crypto.randomUUID();const payload={version,status:'cancelled'};
   const replies=await Promise.all([json('/api/admin/orders/'+orderId+'/status',{data:payload,key}),json('/api/admin/orders/'+orderId+'/status',{data:payload,key})]);assert.ok(replies.every(r=>r.status===200));
-  assert.equal((await db.prepare("SELECT stock FROM products WHERE id='loza-002'").first()).stock,before+2);
-  assert.equal((await db.prepare('SELECT COUNT(*) n FROM admin_stock_returns WHERE order_id=?').bind(orderId).first()).n,1);
+  assert.equal((await db.prepare("SELECT stock FROM products WHERE id='loza-002'").first()).stock,before);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM admin_stock_returns WHERE order_id=?').bind(orderId).first()).n,0);
   assert.equal((await json('/api/admin/orders/'+orderId+'/status',{data:payload})).status,409);
   assert.equal((await json('/api/admin/orders/'+orderId+'/status',{data:{version:version+1,status:'confirmed'}})).status,409);
 });
@@ -208,13 +208,13 @@ test('private responses contain no token; public routes do not expose orders or 
   for(const path of ['/grape-orders-backup.sql','/server/admin.js','/.env','/migrations/0003_admin_telegram.sql'])assert.equal((await request(path,{auth:null})).status,404,path);
   const catalog=await request('/api/products',{auth:null});assert.equal(catalog.status,200);assert.ok(!(await catalog.text()).includes('380991234567'));
 });
-test('full status lifecycle keeps reserved stock deducted; audit records each accepted change',async()=>{
+test('full status lifecycle never changes manual availability or legacy quantity; audit records accepted changes',async()=>{
   const r=await json('/api/orders/create',{data:{...checkout,items:[{productId:'loza-004',quantity:1}]}});assert.equal(r.status,201);
   const id=r.data.orderId;let version=0;
   for(const status of ['confirmed','shipped','completed']){
     assert.equal((await json('/api/admin/orders/'+id+'/status',{data:{version,status}})).status,200);version++;
   }
-  assert.equal((await db.prepare("SELECT stock FROM products WHERE id='loza-004'").first()).stock,19);
+  assert.equal((await db.prepare("SELECT stock FROM products WHERE id='loza-004'").first()).stock,0);
   assert.equal((await json('/api/admin/orders/'+id+'/status',{data:{version,status:'cancelled'}})).status,409);
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM admin_audit_log WHERE target=?').bind(id).first()).n,3);
 });
@@ -263,7 +263,7 @@ function changeCsv(csv,id,column,value){
   const cells=lines[row].slice(1,-1).split('";"');cells[index]=value;lines[row]='"'+cells.join('";"')+'"';return lines.join('\r\n');
 }
 test('CSV full 107-row import is atomic, audited and replay safe; preserves source and legacy transactions',async()=>{
-  let csv=await exported();csv=changeCsv(csv,'loza-001','stock','20');csv=changeCsv(csv,'loza-001','price_uah','123,45');csv=changeCsv(csv,'loza-001','price_confirmed','1');csv=changeCsv(csv,'loza-001','available','1');
+  let csv=await exported();csv=changeCsv(csv,'loza-001','price_uah','123,45');csv=changeCsv(csv,'loza-001','price_confirmed','1');csv=changeCsv(csv,'loza-001','available','1');
   const check=await json('/api/admin/catalog/preview',{data:{csv}});assert.equal(check.status,200);assert.equal(check.data.count,107);
   assert.equal(check.data.rows.find(row=>row.id==='loza-001').priceKop,12345);
   const before=(await db.prepare('SELECT COUNT(*) n FROM admin_audit_log').first()).n,key=crypto.randomUUID();
@@ -273,7 +273,7 @@ test('CSV full 107-row import is atomic, audited and replay safe; preserves sour
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM admin_audit_log').first()).n,before+107);
   const quote=await json('/api/cart/quote',{auth:null,data:{items:[{productId:'loza-001',quantity:2}],priceKop:1}});assert.equal(quote.status,200);assert.equal(quote.data.amountKop,24690);
   const row=await db.prepare("SELECT source_json FROM product_catalog WHERE product_id='loza-001'").first();assert.equal(JSON.parse(row.source_json).priceKop,null);
-  await apply('migrations/0007_stock_inventory.sql');assert.equal((await db.prepare("SELECT price_kop,stock FROM products WHERE id='loza-001'").first()).price_kop,12345);
+  await apply('migrations/0008_manual_catalog_support.sql');assert.equal((await db.prepare("SELECT price_kop,stock FROM products WHERE id='loza-001'").first()).price_kop,12345);
   assert.equal((await db.prepare("SELECT COUNT(*) n FROM orders WHERE id='LEGACY-1'").first()).n,1);assert.equal((await db.prepare('SELECT COUNT(*) n FROM mono_events').first()).n,1);
 });
 test('CSV rejects stale availability, invalid flags, unknown IDs, duplicate rows and tampering without partial writes',async()=>{
@@ -288,7 +288,7 @@ test('CSV rejects stale availability, invalid flags, unknown IDs, duplicate rows
   assert.equal((await json('/api/admin/catalog/import',{data:{csv:changeCsv(fresh,'loza-001','price_uah','1.00'),previewHash:valid.data.previewHash}})).status,400);
   // Force a stale version INSIDE the D1 import trigger: every earlier row must roll back.
   const {productInput}=await import('../server/admin.js');const {parseCsv}=await import('../server/catalog.js');
-  const rows=parseCsv(fresh).map(r=>({id:r.product_id,version:Number(r.version),payload:productInput({name:r.name,version:Number(r.version),priceKop:r.price_uah?Math.round(Number(r.price_uah)*100):null,stock:Number(r.stock),available:r.available==='1',priceConfirmed:r.price_confirmed==='1',characteristicsConfirmed:r.characteristics_confirmed==='1',details:{kishmish:r.kishmish==='1',...Object.fromEntries(['taste','ripening','color','berry','shape','frost'].map(k=>[k,r[k]]))}})}));
+  const rows=parseCsv(fresh).map(r=>({id:r.product_id,version:Number(r.version),payload:productInput({name:r.name,version:Number(r.version),priceKop:r.price_uah?Math.round(Number(r.price_uah)*100):null,available:r.available==='1',priceConfirmed:r.price_confirmed==='1',characteristicsConfirmed:r.characteristics_confirmed==='1',details:{kishmish:r.kishmish==='1',...Object.fromEntries(['taste','ripening','color','berry','shape','frost'].map(k=>[k,r[k]]))}})}));
   rows.at(-1).version+=1;await assert.rejects(db.prepare('INSERT INTO catalog_imports(id,actor,payload_hash,rows_json,row_count) VALUES(?,?,?,?,?)').bind(crypto.randomUUID(),admin,'f'.repeat(64),JSON.stringify(rows),rows.length).run(),/LOZA_VERSION_CONFLICT/);
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM admin_audit_log').first()).n,before);
 });
@@ -309,7 +309,7 @@ test('authorized admin imports a CSV through the mobile dialog without photo fie
 test('catalog cards, search, all filters and cart work without photos on desktop and mobile',{skip:!process.env.LOZA_PLAYWRIGHT_MODULE},async()=>{
   const source=JSON.parse(await readFile(new URL('server/catalog-source.json',root),'utf8')).find(p=>p.id==='loza-002');
   const product=(await json('/api/admin/products?q=loza-002')).data.products[0];
-  assert.equal((await json('/api/admin/products/loza-002',{data:{version:product.version,name:source.name,priceKop:product.price_kop,stock:product.stock,available:true,priceConfirmed:true,characteristicsConfirmed:false,details:source.details}})).status,200);
+  assert.equal((await json('/api/admin/products/loza-002',{data:{version:product.version,name:source.name,priceKop:product.price_kop,available:true,priceConfirmed:true,characteristicsConfirmed:false,details:source.details}})).status,200);
   const {chromium}=await import(pathToFileURL(process.env.LOZA_PLAYWRIGHT_MODULE).href),browser=await chromium.launch({channel:'msedge',headless:true});
   try{for(const width of [1440,390,320]){
     const page=await browser.newPage({viewport:{width,height:900},reducedMotion:'reduce'}),errors=[];page.on('pageerror',error=>errors.push(error.message));
@@ -337,162 +337,154 @@ test('admin mutation rate limits still reject excessive authenticated requests',
 });
 
 async function adminProduct(id){return (await json('/api/admin/products?q='+id)).data.products.find(p=>p.id===id);}
-function editPayload(p,changes={}){return {version:p.version,name:p.name,priceKop:p.price_kop,stock:p.stock,priceConfirmed:p.price_kop!==null && p.confirmed_price_kop===p.price_kop,characteristicsConfirmed:Boolean(p.characteristics_confirmed),available:p.inStock,details:p.details,...changes};}
-test('manual availability preserves the editable stock, is audited and does not bypass price confirmation',async()=>{
-  const id='loza-003';let p=await adminProduct(id);const key=crypto.randomUUID(),input={version:p.version,inStock:true};
-  assert.equal((await json('/api/admin/products/'+id+'/availability',{data:input,key})).status,200);
-  p=await adminProduct(id);assert.equal(p.stock,0);assert.equal(p.inStock,true);
-  for(const stock of [-1,1.5,1000001])assert.equal((await json('/api/admin/products/'+id,{data:editPayload(p,{stock})})).status,400);
-  assert.equal((await json('/api/admin/products/'+id,{data:editPayload(p,{stock:23})})).status,200);
-  p=await adminProduct(id);assert.equal(p.stock,23);
-  assert.equal((await json('/api/cart/quote',{data:{items:[{productId:id,quantity:1}]}})).status,409);
-  assert.equal((await json('/api/admin/products/'+id+'/availability',{data:input,key})).status,200);
-  const {parseCsv}=await import('../server/catalog.js');assert.equal(parseCsv(await exported()).find(p=>p.product_id===id).stock,'23');
-  assert.equal((await json('/api/admin/products/'+id+'/availability',{data:{version:p.version,inStock:false}})).status,200);
-  p=await adminProduct(id);assert.equal(p.stock,23);assert.equal(p.inStock,false);
-  assert.equal((await db.prepare('SELECT COUNT(*) n FROM admin_audit_log WHERE mutation_id=?').bind(key).first()).n,1);
-});
+function editPayload(p,changes={}){return {version:p.version,name:p.name,priceKop:p.price_kop,priceConfirmed:p.price_kop!==null && p.confirmed_price_kop===p.price_kop,characteristicsConfirmed:Boolean(p.characteristics_confirmed),available:p.inStock,details:p.details,...changes};}
 
-test('twenty vines reserve atomically, retries do not deduct twice and cancellation returns them exactly once',async()=>{
+test('manual availability is audited and independent of legacy quantity; price confirmation is still mandatory',async()=>{
+  const id='loza-003';let p=await adminProduct(id);const before=await db.prepare('SELECT stock FROM products WHERE id=?').bind(id).first();
+  assert.equal(Object.hasOwn(p,'stock'),false);
+  assert.equal((await json('/api/admin/products/'+id+'/availability',{data:{version:p.version,inStock:true}})).status,200);
+  p=await adminProduct(id);assert.equal(p.inStock,true);assert.equal(p.confirmed_price_kop,null);
+  assert.equal((await json('/api/cart/quote',{data:{items:[{productId:id,quantity:1}]}})).status,409);
+  for(const stock of [0,20,100])assert.equal((await json('/api/admin/products/'+id,{data:editPayload(p,{stock})})).status,400);
+  assert.deepEqual(await db.prepare('SELECT stock FROM products WHERE id=?').bind(id).first(),before);
+  const {parseCsv}=await import('../server/catalog.js');assert.equal(Object.hasOwn(parseCsv(await exported())[0],'stock'),false);
+  assert.equal((await json('/api/admin/products/'+id+'/availability',{data:{version:p.version,inStock:false}})).status,200);
+});
+test('separate twenty-vine purchase limit does not reserve or deduct; cancellation/replays never alter availability',async()=>{
   const id='loza-005';let p=await adminProduct(id);
-  assert.equal((await json('/api/admin/products/'+id,{data:editPayload(p,{stock:20,priceKop:10000,priceConfirmed:true,available:true})})).status,200);
+  assert.equal((await json('/api/admin/products/'+id,{data:editPayload(p,{priceKop:10000,priceConfirmed:true,available:true})})).status,200);
+  const before=await db.prepare('SELECT p.stock,v.version,a.in_stock FROM products p JOIN admin_product_versions v ON v.product_id=p.id JOIN product_availability a ON a.product_id=p.id WHERE p.id=?').bind(id).first();
+  assert.equal(before.stock,0);
   assert.equal((await json('/api/cart/quote',{data:{items:[{productId:id,quantity:21}]}})).status,400);
   const input={...checkout,items:[{productId:id,quantity:20}]},key=crypto.randomUUID();
-  const r=await json('/api/orders/create',{data:input,key});assert.equal(r.status,201);assert.equal(r.data.amountKop,200000);
-  const replay=await json('/api/orders/create',{data:input,key});assert.equal(replay.status,200);assert.equal(replay.data.orderId,r.data.orderId);
-  p=await adminProduct(id);assert.equal(p.stock,0);assert.equal(p.inStock,true);
-  assert.equal((await json('/api/products',{auth:null})).data.products.find(p=>p.id===id).available,false);
-  assert.equal((await json('/api/orders/create',{data:{...input,items:[{productId:id,quantity:1}]}})).status,409);
-  assert.equal((await db.prepare('SELECT quantity FROM order_items WHERE order_id=?').bind(r.data.orderId).first()).quantity,20);
-  const cancelKey=crypto.randomUUID(),cancel={version:0,status:'cancelled'};
-  assert.equal((await json('/api/admin/orders/'+r.data.orderId+'/status',{data:cancel,key:cancelKey})).status,200);
-  assert.equal((await json('/api/admin/orders/'+r.data.orderId+'/status',{data:cancel,key:cancelKey})).status,200);
-  assert.equal((await adminProduct(id)).stock,20);
-  assert.equal((await db.prepare('SELECT returned FROM order_stock_reservations WHERE order_id=?').bind(r.data.orderId).first()).returned,1);
-  assert.equal((await db.prepare('SELECT COUNT(*) n FROM admin_stock_returns WHERE order_id=?').bind(r.data.orderId).first()).n,1);
+  const responses=await Promise.all([json('/api/orders/create',{data:input,key}),json('/api/orders/create',{data:input})]);assert.deepEqual(responses.map(r=>r.status),[201,201]);
+  assert.equal((await json('/api/orders/create',{data:input,key})).status,200);
+  for(const r of responses){assert.equal(r.data.amountKop,200000);assert.equal((await json('/api/admin/orders/'+r.data.orderId+'/status',{data:{version:0,status:'cancelled'}})).status,200);}
+  const after=await db.prepare('SELECT p.stock,v.version,a.in_stock FROM products p JOIN admin_product_versions v ON v.product_id=p.id JOIN product_availability a ON a.product_id=p.id WHERE p.id=?').bind(id).first();assert.deepEqual(after,before);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM order_stock_reservations').first()).n,0);
+  assert.equal((await json('/api/products',{auth:null})).data.products.find(p=>p.id===id).available,true);
 });
-
-test('cached carts fail checkout after manual unavailability or price revocation; SQL commit rechecks atomically',async()=>{
+test('cached carts and SQL commit recheck manual availability and revoked price, without altering existing orders',async()=>{
   const id='loza-001',items=[{productId:id,quantity:2}];let p=await adminProduct(id);
   assert.equal((await json('/api/cart/quote',{data:{items}})).status,200);
   assert.equal((await json('/api/admin/products/'+id+'/availability',{data:{version:p.version,inStock:false}})).status,200);
-  const before=(await db.prepare('SELECT COUNT(*) n FROM orders').first()).n,outbox=(await db.prepare('SELECT COUNT(*) n FROM telegram_outbox').first()).n;
+  const count=(await db.prepare('SELECT COUNT(*) n FROM orders').first()).n;
   assert.equal((await json('/api/orders/create',{data:{...checkout,items}})).status,409);
-  assert.equal((await db.prepare('SELECT COUNT(*) n FROM orders').first()).n,before);
   await assert.rejects(db.batch([
     db.prepare("INSERT INTO orders(id,amount_kop,status) VALUES('RACE-MANUAL',24690,'pending')"),
     db.prepare("INSERT INTO order_checkout(order_id,request_key_hash,payload_hash,buyer_name,phone,city,delivery_method,delivery_branch,comment,items_json,demo_only) VALUES('RACE-MANUAL',?,?,?,?,?,?,?,?,?,0)")
-      .bind('a'.repeat(64),'b'.repeat(64),'Fixture Buyer','+380991234567','Fixture City','nova_poshta','Fixture branch','',JSON.stringify(items)),
-    db.prepare("INSERT INTO telegram_outbox(event_key,order_id,kind) VALUES('order:RACE-MANUAL','RACE-MANUAL','order')")
+      .bind('a'.repeat(64),'b'.repeat(64),'Fixture Buyer','+380991234567','Fixture City','nova_poshta','Fixture branch','',JSON.stringify(items))
   ]),/LOZA_STOCK_UNAVAILABLE/);
-  assert.equal(await db.prepare("SELECT id FROM orders WHERE id='RACE-MANUAL'").first(),null);
-  assert.equal((await db.prepare('SELECT COUNT(*) n FROM telegram_outbox').first()).n,outbox);
-  p=await adminProduct(id);assert.equal((await json('/api/admin/products/'+id+'/availability',{data:{version:p.version,inStock:true}})).status,200);
-  p=await adminProduct(id);assert.equal((await json('/api/admin/products/'+id,{data:editPayload(p,{priceConfirmed:false})})).status,200);
-  assert.equal((await json('/api/cart/quote',{data:{items}})).status,409);assert.equal((await json('/api/orders/create',{data:{...checkout,items}})).status,409);
-  p=await adminProduct(id);assert.equal(p.inStock,true);assert.equal(p.stock,20);assert.equal((await json('/api/admin/products/'+id,{data:editPayload(p,{priceConfirmed:true})})).status,200);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM orders').first()).n,count);
+  p=await adminProduct(id);assert.equal((await json('/api/admin/products/'+id,{data:editPayload(p,{available:true,priceConfirmed:false})})).status,200);
+  assert.equal((await json('/api/orders/create',{data:{...checkout,items}})).status,409);
+  p=await adminProduct(id);assert.equal((await json('/api/admin/products/'+id,{data:editPayload(p,{priceConfirmed:true})})).status,200);
 });
-test('mobile admin has an availability switch and editable quantity field',{skip:!process.env.LOZA_PLAYWRIGHT_MODULE},async()=>{
-  const {chromium}=await import(pathToFileURL(process.env.LOZA_PLAYWRIGHT_MODULE).href),browser=await chromium.launch({channel:'msedge',headless:true});
-  try{
-    const page=await browser.newPage({viewport:{width:390,height:900},extraHTTPHeaders:{'Cf-Access-Jwt-Assertion':token}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
-    await page.goto((await mf.ready).origin+'/admin');await page.getByRole('heading',{name:'Замовлення за статусами'}).waitFor();await page.getByRole('button',{name:'Товари',exact:true}).click();
-    const toggle=page.getByRole('switch',{name:'Наявність сорту Академік',exact:true});await toggle.waitFor();assert.equal(await toggle.isChecked(),false);
-    await toggle.check();await page.waitForFunction(()=>document.querySelector('input[aria-label="Наявність сорту Академік"]').checked===true);
-    const row=page.getByRole('row').filter({hasText:'Академік'});await row.getByRole('button',{name:'Редагувати',exact:true}).click();await page.getByRole('dialog').waitFor();
-    assert.equal(await page.getByRole('dialog').getByRole('spinbutton').count(),1);assert.equal(await page.getByRole('dialog').getByRole('switch',{name:'В наявності',exact:true}).isChecked(),true);
-    await page.getByRole('dialog').getByRole('spinbutton').fill('7');await page.getByRole('button',{name:'Зберегти товар',exact:true}).click();await page.getByRole('dialog').waitFor({state:'hidden'});
-    assert.equal((await adminProduct('loza-003')).stock,7);
-    await page.getByRole('switch',{name:'Наявність сорту Академік',exact:true}).uncheck();await page.waitForFunction(()=>{const input=document.querySelector('input[aria-label="Наявність сорту Академік"]');return !input.checked && !input.disabled;});
-    assert.equal((await adminProduct('loza-003')).stock,7);
-    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);assert.deepEqual(errors,[]);
-  }finally{await browser.close();}
-});
-
-test('every one of the 107 real varieties can be switched both ways through the protected API without confirming prices',async()=>{
-  const products=(await json('/api/admin/products')).data.products;
-  assert.equal(products.length,107);assert.equal(new Set(products.map(p=>p.id)).size,107);
+test('all 107 manual switches preserve prices, original source, archived quantity and independent price confirmations',async()=>{
+  const products=(await json('/api/admin/products')).data.products;assert.equal(products.length,107);
   for(const original of products){
-    // Reset only the isolated test bucket; the separate rate-limit test still enforces 30 writes/minute.
-    await db.prepare('DELETE FROM checkout_rate_limits').run();
+    await db.prepare('DELETE FROM checkout_rate_limits').run();const legacy=await db.prepare('SELECT stock FROM products WHERE id=?').bind(original.id).first();
     for(const inStock of [!original.inStock,original.inStock]){
-      const current=await adminProduct(original.id),key=crypto.randomUUID();
-      const response=await json('/api/admin/products/'+original.id+'/availability',{data:{version:current.version,inStock},key});
-      assert.equal(response.status,200,original.id);
-      const saved=await adminProduct(original.id);assert.equal(saved.inStock,inStock,original.id);
-      assert.equal(saved.stock,original.stock);assert.equal(saved.price_kop,original.price_kop);
-      assert.equal(saved.confirmed_price_kop,original.confirmed_price_kop);assert.deepEqual(saved.details,original.details);
-      assert.equal((await db.prepare('SELECT COUNT(*) n FROM admin_audit_log WHERE mutation_id=?').bind(key).first()).n,1);
+      const p=await adminProduct(original.id),key=crypto.randomUUID();assert.equal((await json('/api/admin/products/'+p.id+'/availability',{data:{version:p.version,inStock},key})).status,200);
+      const saved=await adminProduct(p.id);assert.equal(saved.inStock,inStock);assert.equal(saved.price_kop,original.price_kop);assert.equal(saved.confirmed_price_kop,original.confirmed_price_kop);assert.deepEqual(saved.details,original.details);assert.deepEqual(saved.source,original.source);
+      assert.deepEqual(await db.prepare('SELECT stock FROM products WHERE id=?').bind(p.id).first(),legacy);assert.equal((await db.prepare('SELECT COUNT(*) n FROM admin_audit_log WHERE mutation_id=?').bind(key).first()).n,1);
     }
   }
 });
-
-test('concurrent orders cannot oversell; an intervening reservation rejects stale admin and CSV writes',async()=>{
-  const id='loza-006';let p=await adminProduct(id);
-  assert.equal((await json('/api/admin/products/'+id,{data:editPayload(p,{stock:3,priceConfirmed:true,available:true})})).status,200);
-  p=await adminProduct(id);const csv=await exported(),checked=await json('/api/admin/catalog/preview',{data:{csv}});
-  assert.equal(checked.status,200);
-  const results=await Promise.all([0,1].map(()=>json('/api/orders/create',{data:{...checkout,items:[{productId:id,quantity:2}]}})));
-  assert.deepEqual(results.map(r=>r.status).sort(),[201,409]);
-  assert.equal((await adminProduct(id)).stock,1);
-  assert.equal((await json('/api/admin/products/'+id,{data:editPayload(p,{stock:100})})).status,409);
-  assert.equal((await json('/api/admin/catalog/import',{data:{csv,previewHash:checked.data.previewHash}})).status,409);
-  assert.equal((await adminProduct(id)).stock,1);
-  const success=results.find(r=>r.status===201);
-  assert.equal((await json('/api/admin/orders/'+success.data.orderId+'/status',{data:{version:0,status:'cancelled'}})).status,200);
-  assert.equal((await adminProduct(id)).stock,3);
-});
-
-test('a later transaction failure rolls back inventory, versions, order snapshots and reservations together',async()=>{
-  const id='loza-006',before=await adminProduct(id),items=JSON.stringify([{productId:id,quantity:2}]);
+test('total purchase limit of 100 is enforced independently on server and inside the transaction',async()=>{
+  const ids=['loza-006','loza-007','loza-008','loza-009','loza-010','loza-011'];
+  for(const id of ids){const p=await adminProduct(id);assert.equal((await json('/api/admin/products/'+id,{data:editPayload(p,{priceKop:10000,priceConfirmed:true,available:true})})).status,200);}
+  const items=ids.map(productId=>({productId,quantity:20}));
+  assert.equal((await json('/api/cart/quote',{data:{items:items.slice(0,5)}})).status,200);
+  assert.equal((await json('/api/orders/create',{data:{...checkout,items}})).status,400);
   await assert.rejects(db.batch([
-    db.prepare("INSERT INTO orders(id,amount_kop,status) SELECT 'ROLLBACK-STOCK',price_kop*2,'pending' FROM products WHERE id=?").bind(id),
-    db.prepare("INSERT INTO order_checkout(order_id,request_key_hash,payload_hash,buyer_name,phone,city,delivery_method,delivery_branch,comment,items_json,demo_only) VALUES('ROLLBACK-STOCK',?,?,?,?,?,?,?,?,?,0)")
-      .bind('7'.repeat(64),'8'.repeat(64),'Fixture Buyer','+380991234567','Fixture City','nova_poshta','Fixture branch','',items),
-    db.prepare("INSERT INTO products(id,name,price_kop,available,stock,is_demo) VALUES('rollback-invalid','fixture',-1,0,0,0)")
-  ]));
-  assert.deepEqual(await adminProduct(id),before);
-  for(const table of ['orders','order_checkout','order_items','order_stock_reservations']){
-    const column=table==='orders'?'id':'order_id';
-    assert.equal((await db.prepare('SELECT COUNT(*) n FROM '+table+' WHERE '+column+"='ROLLBACK-STOCK'").first()).n,0);
-  }
+    db.prepare("INSERT INTO orders(id,amount_kop,status) VALUES('LIMIT-100',1200000,'pending')"),
+    db.prepare("INSERT INTO order_checkout(order_id,request_key_hash,payload_hash,buyer_name,phone,city,delivery_method,delivery_branch,comment,items_json,demo_only) VALUES('LIMIT-100',?,?,?,?,?,?,?,?,?,0)")
+      .bind('7'.repeat(64),'8'.repeat(64),'Fixture Buyer','+380991234567','Fixture City','nova_poshta','Fixture branch','',JSON.stringify(items))
+  ]),/LOZA_QUANTITY_LIMIT/);
+  assert.equal(await db.prepare("SELECT id FROM orders WHERE id='LIMIT-100'").first(),null);
 });
-
-test('cancellation restores every reserved item but respects manual unavailability and revoked prices',async()=>{
-  const ids=['loza-007','loza-008'];
-  for(const id of ids){const p=await adminProduct(id);assert.equal((await json('/api/admin/products/'+id,{data:editPayload(p,{stock:20,priceConfirmed:true,available:true})})).status,200);}
-  const r=await json('/api/orders/create',{data:{...checkout,items:ids.map(productId=>({productId,quantity:3}))}});assert.equal(r.status,201);
-  let p=await adminProduct(ids[0]);assert.equal(p.stock,17);
-  assert.equal((await json('/api/admin/products/'+p.id+'/availability',{data:{version:p.version,inStock:false}})).status,200);
-  p=await adminProduct(ids[1]);assert.equal((await json('/api/admin/products/'+p.id,{data:editPayload(p,{priceConfirmed:false})})).status,200);
-  assert.equal((await json('/api/admin/orders/'+r.data.orderId+'/status',{data:{version:0,status:'cancelled'}})).status,200);
-  for(const id of ids){p=await adminProduct(id);assert.equal(p.stock,20);assert.equal(p.available,0);}
-  assert.equal((await db.prepare('SELECT COUNT(*) n FROM order_stock_reservations WHERE order_id=? AND returned=1').bind(r.data.orderId).first()).n,2);
-  assert.equal((await json('/api/admin/orders/'+r.data.orderId+'/status',{data:{version:1,status:'cancelled'}})).status,409);
-  for(const id of ids)assert.equal((await adminProduct(id)).stock,20);
+test('renaming preserves historical order snapshots, price approval and source; old versions cannot overwrite a rename',async()=>{
+  const id='loza-006',p=await adminProduct(id),r=await json('/api/orders/create',{data:{...checkout,items:[{productId:id,quantity:1}]}});assert.equal(r.status,201);
+  assert.equal((await json('/api/admin/products/'+id,{data:editPayload(p,{name:'Виправлена назва сорту'})})).status,200);
+  const saved=await adminProduct(id);assert.equal(saved.name,'Виправлена назва сорту');assert.equal(saved.price_kop,p.price_kop);assert.equal(saved.confirmed_price_kop,p.confirmed_price_kop);assert.equal(saved.inStock,p.inStock);assert.deepEqual(saved.source,p.source);
+  assert.equal((await db.prepare('SELECT product_name FROM order_items WHERE order_id=?').bind(r.data.orderId).first()).product_name,p.name);
+  assert.equal((await json('/api/admin/products/'+id,{data:editPayload(p,{name:'stale'})})).status,409);
+  assert.equal((await json('/api/admin/products?q='+encodeURIComponent('Виправлена'))).data.products[0].id,id);
 });
-
-test('mobile cart selects at most twenty, persists quantity and respects a smaller actual stock',{skip:!process.env.LOZA_PLAYWRIGHT_MODULE},async()=>{
-  const id='loza-009';let p=await adminProduct(id);
-  assert.equal((await json('/api/admin/products/'+id,{data:editPayload(p,{stock:25,priceConfirmed:true,available:true})})).status,200);
-  p=await adminProduct(id);
+test('mobile admin exposes name correction and manual availability, with no warehouse quantity input',{skip:!process.env.LOZA_PLAYWRIGHT_MODULE},async()=>{
   const {chromium}=await import(pathToFileURL(process.env.LOZA_PLAYWRIGHT_MODULE).href),browser=await chromium.launch({channel:'msedge',headless:true});
   try{
-    const page=await browser.newPage({viewport:{width:390,height:900}});
-    await page.goto((await mf.ready).origin+'/');await page.waitForFunction(()=>document.querySelectorAll('#grid article').length===107);
-    await page.locator('#search').fill(p.name);await page.getByRole('button',{name:'Додати до кошика',exact:true}).click();
-    const plus=page.locator('#grid button[data-action="increase"]');
-    for(let i=1;i<20;i++)await plus.click();
-    assert.equal(await plus.isDisabled(),true);assert.equal(await page.locator('#cartCount').textContent(),'20');
-    await page.reload();await page.waitForFunction(()=>document.querySelector('#cartCount').textContent==='20');
-    await page.locator('#search').fill(p.name);assert.equal(await plus.isDisabled(),true);
-    assert.equal((await json('/api/admin/products/'+id,{data:editPayload(p,{stock:3})})).status,200);
-    await page.reload();await page.waitForFunction(()=>document.querySelectorAll('#grid article').length===107);
-    await page.locator('#search').fill(p.name);assert.equal(await plus.isDisabled(),true);
-    // Existing oversized carts remain visible for correction; the server refuses the old quantity.
-    assert.equal((await json('/api/cart/quote',{data:{items:[{productId:id,quantity:20}]}})).status,409);
-    const minus=page.locator('#grid button[data-action="decrease"]');for(let i=20;i>3;i--)await minus.click();
-    assert.equal(await plus.isDisabled(),true);assert.equal(await page.locator('#cartCount').textContent(),'3');
+    const page=await browser.newPage({viewport:{width:390,height:900},extraHTTPHeaders:{'Cf-Access-Jwt-Assertion':token}});await page.goto((await mf.ready).origin+'/admin');await page.getByRole('button',{name:'Товари',exact:true}).click();
+    const row=page.getByRole('row').filter({hasText:'Академік'});await row.getByRole('button',{name:'Редагувати',exact:true}).click();
+    assert.equal(await page.getByRole('dialog').getByRole('spinbutton').count(),0);assert.equal(await page.getByRole('switch',{name:'В наявності',exact:true}).count(),1);await page.getByRole('button',{name:'Закрити',exact:true}).click();
+    await row.getByRole('button',{name:'Змінити назву',exact:true}).click();await page.getByRole('textbox',{name:'Назва сорту',exact:true}).fill('Академік · назва перевірена');await page.getByRole('button',{name:'Зберегти назву',exact:true}).click();await page.getByRole('cell',{name:'Академік · назва перевірена',exact:true}).waitFor();
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  }finally{await browser.close();}
+});
+test('mobile catalog/cart allow up to 20 despite archived stock=0, persist the cart and never display warehouse values',{skip:!process.env.LOZA_PLAYWRIGHT_MODULE},async()=>{
+  const p=await adminProduct('loza-009');assert.equal((await db.prepare('SELECT stock FROM products WHERE id=?').bind(p.id).first()).stock,0);
+  const {chromium}=await import(pathToFileURL(process.env.LOZA_PLAYWRIGHT_MODULE).href),browser=await chromium.launch({channel:'msedge',headless:true});
+  try{
+    const page=await browser.newPage({viewport:{width:390,height:900}}),errors=[];page.on('pageerror',e=>errors.push(e.message));await page.goto((await mf.ready).origin+'/');await page.waitForFunction(()=>document.querySelectorAll('#grid article').length===107);
+    await page.locator('#search').fill(p.name);await page.getByRole('button',{name:'Додати до кошика',exact:true}).click();const plus=page.locator('#grid button[data-action="increase"]');for(let i=1;i<20;i++)await plus.click();assert.equal(await plus.isDisabled(),true);
+    await page.reload();await page.waitForFunction(()=>document.querySelector('#cartCount').textContent==='20');await page.locator('#search').fill(p.name);assert.equal(await plus.isDisabled(),true);assert.equal(await page.locator('.store-stock').first().innerText(),'В наявності');assert.deepEqual(errors,[]);
+  }finally{await browser.close();}
+});
+
+const supportData={contactType:'telegram',contact:'@fixture_support',reason:'checkout',message:'Fixture private support message about checkout.',turnstileToken:'support-fixture'};
+let supportId;
+test('support requires a callback contact and reason; validates phone/Telegram, body size, origin, content type and captcha action',async()=>{
+  for(const change of [{contact:''},{contact:'https://evil.test'},{reason:'invented'},{contactType:'phone',contact:'123'},{message:'short'},{message:'a'.repeat(2001)},{website:'spam'}]){
+    await db.prepare('DELETE FROM checkout_rate_limits').run();assert.equal((await json('/api/support/create',{auth:null,data:{...supportData,...change}})).status,400);
+  }
+  await db.prepare('DELETE FROM checkout_rate_limits').run();
+  assert.equal((await json('/api/support/create',{auth:null,data:{...supportData,turnstileToken:'checkout-action-fixture'}})).status,400);
+  assert.equal((await json('/api/support/create',{auth:null,data:supportData,headers:{Origin:'https://evil.test'}})).status,403);
+  assert.equal((await json('/api/support/create',{auth:null,data:supportData,headers:{'Content-Type':'text/plain'}})).status,415);
+});
+test('support saves atomically, deduplicates retries and discloses no contact/message publicly or in Telegram',async()=>{
+  const key=crypto.randomUUID();const r=await json('/api/support/create',{auth:null,data:supportData,key});assert.equal(r.status,201);supportId=r.data.ticketId;
+  const replay=await json('/api/support/create',{auth:null,data:supportData,key});assert.equal(replay.status,200);assert.equal(replay.data.ticketId,supportId);
+  assert.equal((await json('/api/support/create',{auth:null,data:{...supportData,message:'Different private message'},key})).status,409);await settle();
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM support_tickets WHERE id=?').bind(supportId).first()).n,1);
+  const text=sent.filter(p=>p.text.includes(supportId));assert.equal(text.length,1);assert.match(text[0].text,/Нове звернення/);
+  for(const pii of [supportData.contact,supportData.message]){assert.ok(!text[0].text.includes(pii));assert.ok(!JSON.stringify(r.data).includes(pii));}
+  for(const path of ['/api/admin/support','/api/admin/support/'+supportId])assert.equal((await request(path,{auth:null})).status,403);
+  assert.equal((await request('/api/support/'+supportId,{auth:null})).status,404);
+  const privateTicket=await json('/api/admin/support/'+supportId);assert.equal(privateTicket.data.ticket.contact,supportData.contact);assert.match(privateTicket.headers.get('Cache-Control'),/no-store/);
+});
+test('support rate limit stops excessive requests and missing contact never creates a ticket',async()=>{
+  for(let i=0;i<3;i++)assert.equal((await json('/api/support/create',{auth:null,data:{...supportData,contact:''}})).status,400);
+  assert.equal((await json('/api/support/create',{auth:null,data:supportData})).status,429);
+});
+test('support statuses require admin and CSRF, use versions, are replay safe and record an audit history',async()=>{
+  const path='/api/admin/support/'+supportId+'/status',data={version:0,status:'in_progress'},key=crypto.randomUUID();
+  for(const options of [{auth:null},{csrfToken:''},{headers:{Origin:'https://evil.test'}}])assert.equal((await json(path,{data,...options})).status,403);
+  assert.equal((await json(path,{data,key})).status,200);assert.equal((await json(path,{data,key})).status,200);assert.equal((await json(path,{data})).status,409);
+  const r=await json('/api/admin/support/'+supportId);assert.equal(r.data.ticket.status,'in_progress');assert.equal(r.data.ticket.version,1);assert.equal(r.data.actions.length,1);assert.equal(r.data.actions[0].actor,admin);
+});
+test('Telegram support failures preserve tickets; confirmed rejection retries, uncertain delivery requires deliberate review',async()=>{
+  telegramMode='429';const r=await json('/api/support/create',{data:{...supportData,contactType:'phone',contact:'099 123 45 67'}});assert.equal(r.status,201);await settle();
+  const id=r.data.ticketId;let notification=await db.prepare('SELECT state FROM support_outbox WHERE ticket_id=?').bind(id).first();assert.equal(notification.state,'retry');
+  telegramMode='ok';await db.prepare('UPDATE support_outbox SET next_attempt=0 WHERE ticket_id=?').bind(id).run();
+  assert.equal((await json('/api/admin/support/'+id+'/retry',{data:{allowDuplicateRisk:false}})).status,200);notification=await db.prepare('SELECT state FROM support_outbox WHERE ticket_id=?').bind(id).first();assert.equal(notification.state,'sent');
+  assert.equal((await json('/api/admin/support/'+id)).data.ticket.contact,'+380991234567');
+  const before=calls;assert.equal((await json('/api/admin/support/'+id+'/retry',{data:{allowDuplicateRisk:false}})).status,200);assert.equal(calls,before);
+  telegramMode='uncertain';const uncertain=await json('/api/support/create',{data:supportData});assert.equal(uncertain.status,201);await settle();const uid=uncertain.data.ticketId;telegramMode='ok';const count=calls;
+  assert.equal((await json('/api/admin/support/'+uid+'/retry',{data:{allowDuplicateRisk:false}})).status,200);assert.equal(calls,count);assert.equal((await db.prepare('SELECT state FROM support_outbox WHERE ticket_id=?').bind(uid).first()).state,'uncertain');
+});
+test('mobile support form accepts a contact and reason; protected admin renders message text safely',{skip:!process.env.LOZA_PLAYWRIGHT_MODULE},async()=>{
+  const {chromium}=await import(pathToFileURL(process.env.LOZA_PLAYWRIGHT_MODULE).href),browser=await chromium.launch({channel:'msedge',headless:true});
+  try{
+    const page=await browser.newPage({viewport:{width:390,height:900}});await page.addInitScript(()=>{window.turnstile={render(selector,options){document.querySelector(selector).textContent='Локальна тестова перевірка';options.callback('support-fixture');return 'fixture-widget';},remove(){},reset(){}};});
+    await page.goto((await mf.ready).origin+'/');await page.getByRole('button',{name:'Написати в підтримку',exact:true}).first().click();await page.getByLabel('Причина звернення *',{exact:false}).selectOption('technical');
+    assert.equal(await page.getByRole('button',{name:'Надіслати звернення',exact:true}).isEnabled(),true);
+    await page.getByLabel('Контакт для відповіді *',{exact:true}).fill('@fixture_ui_support');await page.getByLabel('Що сталося? *',{exact:true}).fill('<img src=x onerror="window.__supportXss=1"> Fixture support message.');
+    await page.getByRole('button',{name:'Надіслати звернення',exact:true}).click();await page.getByText('Звернення отримано. Номер:',{exact:false}).waitFor();assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+    const ticket=await db.prepare("SELECT id FROM support_tickets WHERE contact='@fixture_ui_support'").first();assert.ok(ticket);
+    const adminPage=await browser.newPage({viewport:{width:390,height:900},extraHTTPHeaders:{'Cf-Access-Jwt-Assertion':token}});await adminPage.goto((await mf.ready).origin+'/admin');await adminPage.getByRole('button',{name:'Підтримка',exact:true}).click();const row=adminPage.getByRole('row').filter({hasText:'@fixture_ui_support'});await row.getByRole('button',{name:'Відкрити звернення',exact:true}).click();
+    assert.equal(await adminPage.locator('#editor img').count(),0);assert.equal(await adminPage.evaluate(()=>window.__supportXss),undefined);await adminPage.getByText('Fixture support message.',{exact:false}).waitFor();assert.equal(await adminPage.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+    await page.screenshot({path:new URL('.wrangler/support-mobile.png',root).pathname.slice(process.platform==='win32'?1:0),fullPage:false});
   }finally{await browser.close();}
 });

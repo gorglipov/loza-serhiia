@@ -1,6 +1,6 @@
 import {body,digest,json,StoreError} from './checkout.js';
 
-const columns=['product_id','version','name','price_uah','price_confirmed','available','stock','taste','ripening','color','kishmish','berry','shape','frost','characteristics_confirmed'];
+const columns=['product_id','version','name','price_uah','price_confirmed','available','taste','ripening','color','kishmish','berry','shape','frost','characteristics_confirmed'];
 const invalid=message=>new StoreError('INVALID_CSV',message);
 const integer=(value,max)=>/^\d+$/.test(value) && Number.isSafeInteger(Number(value)) && Number(value)<=max;
 const flag=(value,column,row)=>{if(!['0','1'].includes(value))throw invalid(`Рядок ${row}: ${column} має бути 0 або 1.`);return value==='1';};
@@ -37,11 +37,10 @@ function normalize(source,productInput) {
     if(!/^[a-z0-9][a-z0-9-]{0,63}$/.test(id) || seen.has(id))throw invalid(`Рядок ${n}: невідомий або повторний код товару.`);
     seen.add(id);
     if(!integer(row.version,100000000))throw invalid(`Рядок ${n}: перевірте версію товару.`);
-    if(!integer(row.stock,1000000))throw invalid(`Рядок ${n}: залишок має бути цілим числом від 0 до 1000000.`);
     if(row.price_uah && !/^\d{1,7}([.,]\d{1,2})?$/.test(row.price_uah))throw invalid(`Рядок ${n}: ціна має бути додатною сумою у гривнях.`);
     const [whole,fraction='']=row.price_uah.replace(',','.').split('.');
     const input={version:Number(row.version),name:row.name,priceKop:row.price_uah?Number(whole)*100+Number(fraction.padEnd(2,'0')):null,
-      available:flag(row.available,'available',n),stock:Number(row.stock),priceConfirmed:flag(row.price_confirmed,'price_confirmed',n),
+      available:flag(row.available,'available',n),priceConfirmed:flag(row.price_confirmed,'price_confirmed',n),
       characteristicsConfirmed:flag(row.characteristics_confirmed,'characteristics_confirmed',n),details:{kishmish:flag(row.kishmish,'kishmish',n)}};
     for(const key of ['taste','ripening','color','berry','shape','frost'])input.details[key]=row[key];
     let payload;try{payload=productInput(input);}catch{throw invalid(`Рядок ${n}: перевірте назву, ціну, підтвердження та наявність. Підтверджена ціна не може бути порожньою.`);}
@@ -55,7 +54,7 @@ export function exportCsv(rows) {
   for(const row of rows){
     const d=JSON.parse(row.details_json);
     lines.push([row.id,row.version,row.name,row.price_kop===null?'':(row.price_kop/100).toFixed(2),
-      row.price_kop!==null && row.confirmed_price_kop===row.price_kop?1:0,row.in_stock?1:0,row.stock,
+      row.price_kop!==null && row.confirmed_price_kop===row.price_kop?1:0,row.in_stock?1:0,
       d.taste,d.ripening,d.color,d.kishmish?1:0,d.berry,d.shape,d.frost,row.characteristics_confirmed]);
   }
   return '\uFEFF'+lines.map(row=>row.map(cell).join(';')).join('\r\n')+'\r\n';
@@ -87,7 +86,7 @@ export async function catalogApi(context,database,route,actor,productInput,comma
     if(versions.get(row.id)!==row.version)throw new StoreError('VERSION_CONFLICT',`Товар ${row.id} змінено. Завантажте свіжий CSV, щоб не втратити зміни.`,409);
   }
   if(route==='catalog/preview')return json({success:true,previewHash:hash,count:rows.length,
-    rows:rows.map(row=>({id:row.id,name:row.payload.name,priceKop:row.payload.priceKop,stock:row.payload.stock,available:Boolean(row.payload.available),priceConfirmed:Boolean(row.payload.priceConfirmed)}))});
+    rows:rows.map(row=>({id:row.id,name:row.payload.name,priceKop:row.payload.priceKop,available:Boolean(row.payload.available),priceConfirmed:Boolean(row.payload.priceConfirmed)}))});
   try{
     // One INSERT; its trigger applies every product mutation, audit and version check atomically.
     await database.prepare('INSERT INTO catalog_imports(id,actor,payload_hash,rows_json,row_count) VALUES(?,?,?,?,?)')
