@@ -86,7 +86,7 @@
   async function editOrder(id) {
     try{
       const {order:o,items,payment,paymentReady,paymentTerms}=await api('orders/'+encodeURIComponent(id));openEditor('Замовлення');
-      const dl=el('dl',undefined,'detail');for(const [label,value]of [['Номер',o.id],['Дата',date(o.created_at)],['Сума',money(o.amount_kop)],['Покупець',o.buyer_name],['Телефон',o.phone],['Доставка',[o.city,o.delivery_method==='nova_poshta'?'Нова пошта':o.delivery_method==='ukrposhta'?'Укрпошта':'',o.delivery_branch].filter(Boolean).join(' · ')],['Умови оплати',/^\[LOZA_PAYMENT:deposit_cod\] /.test(o.comment||'') ? 'Передоплата 100 грн, післяплата '+money(Math.max(0,o.amount_kop-10000)) : /^\[LOZA_PAYMENT:full\] /.test(o.comment||'') ? 'Повна передоплата '+money(o.amount_kop) : 'Не обрано (старе замовлення)'],['Статус оплати',paymentReady?(payment?paymentLabels[payment.state] || payment.state:'Немає умов оплати'):'Облік оплати ще не налаштовано'],['Коментар',(o.comment||'').replace(/^\[LOZA_PAYMENT:(?:full|deposit_cod)\] /,'') || '—']])dl.append(el('dt',label),el('dd',value || '—'));
+      const dl=el('dl',undefined,'detail');for(const [label,value]of [['Номер',o.id],['Дата',date(o.created_at)],['Сума',money(o.amount_kop)],['Покупець',o.buyer_name],['Телефон',o.phone],['Доставка',[o.city,o.delivery_method==='nova_poshta'?'Нова пошта':o.delivery_method==='ukrposhta'?'Укрпошта':'',o.delivery_branch].filter(Boolean).join(' · ')],['Умови оплати',paymentTerms?.mode ? 'Передоплата '+money(paymentTerms.advanceKop)+', післяплата '+money(paymentTerms.codKop) : 'Не обрано або некоректні умови оплати'],['Статус оплати',paymentReady?(payment?paymentLabels[payment.state] || payment.state:'Немає умов оплати'):'Облік оплати ще не налаштовано'],['Коментар',(o.comment||'').replace(/^\[LOZA_PAYMENT:(?:full|deposit_cod)\] /,'') || '—']])dl.append(el('dt',label),el('dd',value || '—'));
       $('editorBody').append(dl,table(['Товар','Кількість','Сума'],items.map(i=>[i.product_name,i.quantity,money(i.line_total_kop)])));
       const form=el('form'),label=el('label','Статус замовлення'),select=el('select');
       const next={pending:['confirmed','cancelled'],confirmed:['shipped','cancelled'],shipped:['completed']}[o.status] || [];
@@ -107,6 +107,7 @@
         for(const [value,title]of Object.entries(paymentLabels)){
           const option=el('option',title);option.value=value;paySelect.append(option);
         }
+        paySelect.setAttribute('aria-label','Статус оплати');
         paySelect.value=payment.state;payLabel.append(paySelect);
         const confirmHint=el('p','«Покупець повідомив» не означає, що кошти отримано. Вибирайте «Надходження підтверджено вручну» лише після перевірки рахунку. Це стосується тільки передоплати; післяплата окремо.','hint');
         const paySubmit=el('button','Зберегти статус оплати','primary');paySubmit.type='submit';
@@ -173,6 +174,7 @@
     const holder=el('div');let before='';
     async function refresh(){const data=await api('audit'+(before?'?before='+before:''));holder.replaceChildren(table(['Коли / хто','Дія','Об’єкт','Зміни'],data.changes.map(r=>{const details=el('details'),summary=el('summary','Переглянути');details.append(summary,el('pre',JSON.stringify({до:JSON.parse(r.before_json),після:JSON.parse(r.after_json)},null,2),'audit-detail'));return [date(r.created_at)+' · '+r.actor,r.action,r.target,details];})));
       if(data.changes.length===50)holder.append(button('Старіші зміни',()=>{before=data.changes.at(-1).id;refresh().catch(e=>notice(e.message,true));}));
+      if(data.payments?.length)holder.append(el('h2','Зміни статусу оплати (останні 100)'),table(['Коли / хто','Замовлення','Версія','Зміна'],data.payments.map(r=>[date(r.created_at)+' · '+r.actor,r.order_id,r.expected_version+' → '+(r.expected_version+1),paymentLabels[r.previous_state]+' → '+paymentLabels[r.new_state]])));
       if(data.notifications.length)holder.append(el('h2','Дії зі сповіщеннями'),table(['Коли','Адміністратор','Дія','Подія'],data.notifications.map(r=>[date(r.created_at),r.actor,r.action,r.event_key])));
     }await refresh();return[holder];
   }

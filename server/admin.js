@@ -121,6 +121,7 @@ export async function adminApi(context) {
     const paymentRoute=route.match(/^orders\/([A-Za-z0-9-]{1,100})\/payment$/);
     if(paymentRoute && method==='POST') {
       if(!await paymentReady(database))throw new StoreError('PAYMENT_MIGRATION_REQUIRED','Налаштуйте міграцію 0009_payment_tracking у D1 Preview.',503);
+      if(!await database.prepare("SELECT version FROM loza_store_migrations WHERE version='0010_payment_audit_guards'").first())throw new StoreError('PAYMENT_MIGRATION_REQUIRED','Застосуйте міграцію 0010_payment_audit_guards у D1 цього середовища.',503);
       const input=await body(context.request);
       if(!int(input.version) || !PAYMENT_STATES.includes(input.state) || (input.state==='confirmed' && input.confirmedAfterBankCheck!==true)) {
         throw new StoreError('INVALID_PAYMENT_STATUS','Оберіть статус. Підтверджувати надходження можна лише після власної перевірки.',400);
@@ -131,8 +132,12 @@ export async function adminApi(context) {
       let saved=await previous();
       if(saved && !matches(saved))throw new StoreError('MUTATION_CONFLICT','Ключ дії вже використано для іншої зміни.',409);
       if(!saved) {
-        const state=await database.prepare('SELECT state,version FROM loza_payment_states WHERE order_id=?').bind(target).first();
+        const state=await database.prepare('SELECT ps.state,ps.version,o.amount_kop,c.comment FROM loza_payment_states ps JOIN orders o ON o.id=ps.order_id LEFT JOIN order_checkout c ON c.order_id=o.id WHERE ps.order_id=?').bind(target).first();
         if(!state)throw new StoreError('PAYMENT_NOT_TRACKED','Для цього замовлення немає вибраного способу оплати.',404);
+        const terms=paymentFromStored(state.comment,state.amount_kop);
+        if(!terms.mode)throw new StoreError('INVALID_PAYMENT_TERMS','Сума або умови оплати некоректні. Перевірте замовлення.',409);
+        if(state.version!==input.version)throw new StoreError('VERSION_CONFLICT','Стан оплати змінився. Оновіть замовлення й повторіть.',409);
+        if(state.state===input.state)throw new StoreError('PAYMENT_UNCHANGED','Цей статус уже встановлено.',409);
         try{
           await database.prepare('INSERT INTO loza_payment_actions(id,order_id,actor,expected_version,new_state) VALUES(?,?,?,?,?)')
             .bind(id,target,actor,input.version,input.state).run();
@@ -166,7 +171,8 @@ export async function adminApi(context) {
       const before=Number(url.searchParams.get('before') || Number.MAX_SAFE_INTEGER); if(!int(before,Number.MAX_SAFE_INTEGER)) throw invalid();
       const rows=await database.prepare('SELECT * FROM admin_audit_log WHERE id<? ORDER BY id DESC LIMIT 50').bind(before).all();
       const notifications=await database.prepare('SELECT actor,action,event_key,created_at FROM admin_notification_actions ORDER BY created_at DESC LIMIT 30').all();
-      return json({success:true,changes:rows.results,notifications:notifications.results});
+      const payments=await paymentReady(database)?await database.prepare(`SELECT a.*,COALESCE((SELECT p.new_state FROM loza_payment_actions p WHERE p.order_id=a.order_id AND p.expected_version=a.expected_version-1),'awaiting') AS previous_state FROM loza_payment_actions a ORDER BY a.created_at DESC,a.order_id,a.expected_version DESC LIMIT 100`).all():{results:[]};
+      return json({success:true,changes:rows.results,notifications:notifications.results,payments:payments.results});
     }
     if(method==='GET' && route==='telegram') {
       const settings=await database.prepare('SELECT enabled,version FROM telegram_settings WHERE id=1').first();

@@ -78,6 +78,7 @@ before(async()=>{
   await db.prepare("INSERT INTO admin_stock_returns(order_id) VALUES('LEGACY-CANCELLED')").run();
   await apply('migrations/0005_manual_availability.sql');await apply('migrations/0005_manual_availability.sql');
   await apply('migrations/0009_payment_tracking.sql');await apply('migrations/0009_payment_tracking.sql');
+  await apply('migrations/0010_payment_audit_guards.sql');await apply('migrations/0010_payment_audit_guards.sql');
   token=await jwt();const session=await json('/api/admin/session');assert.equal(session.status,200);csrf=session.data.csrfToken;
 });
 after(async()=>{if(mf)await mf.dispose();});
@@ -227,6 +228,37 @@ test('payment ledger: new order starts unpaid; admin alone can report, manually 
   assert.deepEqual({amount:intact.amount_kop,status:intact.status},{amount:30000,status:'pending'});
   const original=await db.prepare('SELECT comment FROM order_checkout WHERE order_id=?').bind(id).first();
   assert.match(original.comment,/^\[LOZA_PAYMENT:deposit_cod\] /);
+});
+test('payment conflicts, concurrent retries, corrections and immutable audit preserve checkout',async()=>{
+  const created=await json('/api/orders/create',{data:checkout});assert.equal(created.status,201);
+  const id=created.data.orderId,path='/api/admin/orders/'+id+'/payment';
+  const snapshot=async()=>({order:await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first(),checkout:await db.prepare('SELECT * FROM order_checkout WHERE order_id=?').bind(id).first()});
+  const original=await snapshot();
+  for(const version of [-1,0.5,'0',null,100000001])assert.equal((await json(path,{data:{version,state:'reported'}})).status,400);
+  for(const flag of [undefined,false,1,'true'])assert.equal((await json(path,{data:{version:0,state:'confirmed',confirmedAfterBankCheck:flag}})).status,400);
+  assert.equal((await json(path,{data:{version:0,state:'awaiting'}})).status,409);
+  const key=crypto.randomUUID(),payload={version:0,state:'reported'};
+  const replay=await Promise.all([json(path,{data:payload,key}),json(path,{data:payload,key})]);assert.deepEqual(replay.map(r=>r.status),[200,200]);
+  assert.equal((await json(path,{data:{version:0,state:'not_paid'},key})).status,409);
+  const race=await Promise.all(['not_paid','confirmed'].map(state=>json(path,{data:{version:1,state,confirmedAfterBankCheck:true}})));assert.deepEqual(race.map(r=>r.status).sort(),[200,409]);
+  assert.equal((await json(path,{data:{version:2,state:'awaiting'}})).status,200);
+  // Replaying an old accepted action must not overwrite the later correction.
+  const old=await json(path,{data:payload,key});assert.equal(old.status,200);assert.equal(old.data.payment.state,'awaiting');assert.equal(old.data.payment.version,3);
+  const actions=(await json('/api/admin/audit')).data.payments.filter(r=>r.order_id===id);assert.equal(actions.length,3);assert.ok(actions.every(r=>r.actor===admin));
+  assert.equal(actions.find(r=>r.expected_version===0).previous_state,'awaiting');
+  await assert.rejects(db.prepare('UPDATE loza_payment_actions SET actor=? WHERE id=?').bind('other',key).run(),/IMMUTABLE/);
+  await assert.rejects(db.prepare('DELETE FROM loza_payment_actions WHERE id=?').bind(key).run(),/IMMUTABLE/);
+  await apply('migrations/0009_payment_tracking.sql');await apply('migrations/0010_payment_audit_guards.sql');
+  assert.deepEqual(await snapshot(),original);
+});
+test('invalid historical payment totals cannot be manually confirmed',async()=>{
+  for(const amount of [9900,0,-100,10000.5]){
+    const r=await json('/api/orders/create',{data:checkout});assert.equal(r.status,201);const id=r.data.orderId;
+    await db.prepare('UPDATE orders SET amount_kop=? WHERE id=?').bind(amount,id).run();
+    const result=await json('/api/admin/orders/'+id+'/payment',{data:{version:0,state:'confirmed',confirmedAfterBankCheck:true}});assert.equal(result.status,409);
+    assert.equal((await db.prepare('SELECT version FROM loza_payment_states WHERE order_id=?').bind(id).first()).version,0);
+  }
+  for(const amount of [NaN,Infinity,1.5,-1,0,Number.MAX_SAFE_INTEGER+1])assert.throws(()=>paymentBreakdown(amount,'full'));
 });
 test('optimistic product updates reject stale versions and SQL injection is data',async()=>{
   const row=await db.prepare("SELECT p.*,v.version FROM products p JOIN admin_product_versions v ON v.product_id=p.id WHERE p.id='loza-002'").first();
@@ -493,4 +525,29 @@ test('every one of the 107 real varieties can be switched both ways through the 
       assert.equal((await db.prepare('SELECT COUNT(*) n FROM admin_audit_log WHERE mutation_id=?').bind(key).first()).n,1);
     }
   }
+});
+
+test('payment confirmation dialog cancellation has no effect; explicit acceptance changes only payment',{skip:!process.env.LOZA_PLAYWRIGHT_MODULE,timeout:25000},async()=>{
+  const created=await json('/api/orders/create',{data:{...checkout,items:[{productId:'loza-004',quantity:2}]}});assert.equal(created.status,201);const id=created.data.orderId;
+  const {chromium}=await import(pathToFileURL(process.env.LOZA_PLAYWRIGHT_MODULE).href),browser=await chromium.launch({channel:'msedge',headless:true});
+  try{
+    const page=await browser.newPage({viewport:{width:390,height:900},extraHTTPHeaders:{'Cf-Access-Jwt-Assertion':token}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
+    await page.goto((await mf.ready).origin+'/admin');await page.getByRole('heading',{name:'Замовлення за статусами'}).waitFor();await page.getByRole('button',{name:'Замовлення',exact:true}).click();
+    await page.getByRole('row').filter({hasText:id}).getByRole('button',{name:'Деталі'}).click();
+    page.setDefaultTimeout(8000);
+    const select=page.getByLabel('Статус оплати',{exact:true});await select.selectOption('confirmed');
+    page.once('dialog',d=>d.dismiss());await page.getByRole('button',{name:'Зберегти статус оплати'}).click();
+    assert.equal((await db.prepare('SELECT state FROM loza_payment_states WHERE order_id=?').bind(id).first()).state,'awaiting');
+    page.once('dialog',d=>d.accept());await page.getByRole('button',{name:'Зберегти статус оплати'}).click();await page.getByRole('dialog').waitFor({state:'hidden'});
+    assert.equal((await db.prepare('SELECT state FROM loza_payment_states WHERE order_id=?').bind(id).first()).state,'confirmed');
+    const order=await db.prepare('SELECT amount_kop,status FROM orders WHERE id=?').bind(id).first();assert.equal(order.amount_kop,created.data.amountKop);assert.equal(order.status,'pending');assert.deepEqual(errors,[]);
+  }finally{await browser.close();}
+});
+
+test('installed 0009 stays readable while missing audit guards block writes',async()=>{
+  await db.prepare("DELETE FROM loza_store_migrations WHERE version='0010_payment_audit_guards'").run();
+  try{
+    assert.equal((await json('/api/admin/orders')).status,200);
+    const result=await json('/api/admin/orders/LEGACY-1/payment',{data:{version:0,state:'confirmed',confirmedAfterBankCheck:true}});assert.equal(result.status,503);assert.equal(result.data.code,'PAYMENT_MIGRATION_REQUIRED');
+  }finally{await apply('migrations/0010_payment_audit_guards.sql');}
 });
