@@ -30,7 +30,7 @@
   }
   async function saving(action) {
     if(busy)return;busy=true;document.querySelectorAll('button').forEach(b=>b.disabled=true);
-    try{await action();notice('Зміни збережено.');}catch(error){notice(error.message,true);}finally{busy=false;document.querySelectorAll('button').forEach(b=>b.disabled=false);}
+    try{const message=await action();notice(typeof message==='string'?message:'Зміни збережено.');}catch(error){notice(error.message,true);}finally{busy=false;document.querySelectorAll('button').forEach(b=>b.disabled=false);}
   }
   function openEditor(title){$('editorTitle').textContent=title;$('editorBody').replaceChildren();dialog.showModal();}
   function field(parent,title,value,options={}) {
@@ -43,16 +43,20 @@
     openEditor(product.name);const form=el('form'),grid=el('div',undefined,'form-grid');
     const name=field(grid,'Назва',product.name,{wide:true,max:160,required:true}),price=field(grid,'Ціна у гривнях (порожньо — без ціни)',product.price_kop===null?'':(product.price_kop/100).toFixed(2));price.inputMode='decimal';
     const stock=field(grid,'Доступний залишок',product.stock,{type:'number',required:true});
+    const confirmedLabel=el('label',undefined,'check wide'),confirmed=el('input');confirmed.type='checkbox';confirmed.checked=product.price_kop!==null && product.confirmed_price_kop===product.price_kop;confirmedLabel.append(confirmed,document.createTextNode('Підтверджую ціну для продажу'));grid.append(confirmedLabel);
     const activeLabel=el('label',undefined,'check wide'),active=el('input');active.type='checkbox';active.checked=!!product.available;activeLabel.append(active,document.createTextNode('Доступний для замовлення'));grid.append(activeLabel);
     const fields={};for(const [key,title] of Object.entries({ripening:'Термін дозрівання',color:'Колір',taste:'Смак',berry:'Ягода',shape:'Форма',frost:'Морозостійкість'}))fields[key]=field(grid,title,product.details[key],{max:500});
     const kishLabel=el('label',undefined,'check wide'),kish=el('input');kish.type='checkbox';kish.checked=!!product.details.kishmish;kishLabel.append(kish,document.createTextNode('Кишмиш'));grid.append(kishLabel);
+    const reviewedLabel=el('label',undefined,'check wide'),reviewed=el('input');reviewed.type='checkbox';reviewed.checked=!!product.characteristics_confirmed;reviewedLabel.append(reviewed,document.createTextNode('Характеристики перевірено власником'));grid.append(reviewedLabel);
+    if(product.source)form.append(el('p',`Джерело: ${product.source.document}, сторінка ${product.source.page}, рядок ${product.source.row}. Ціна у PDF: ${money(product.source.priceKop)}. Оригінальні дані джерела зберігаються окремо. Фото не потрібне.`,'hint'));
+    price.addEventListener('input',()=>confirmed.checked=false);
     form.append(grid,el('p','Залишок уже враховує зарезервовані замовлення. Якщо його змінить інше замовлення, збереження буде відхилено.','hint'));
     const submit=el('button','Зберегти товар','primary');submit.type='submit';form.append(submit);
     form.addEventListener('submit',e=>{e.preventDefault();saving(async()=>{
       const value=price.value.trim().replace(',','.');if(value && !/^\d{1,7}(\.\d{1,2})?$/.test(value))throw new Error('Введіть ціну, наприклад 500,00.');
       const [whole,fraction='']=value.split('.');const priceKop=value?Number(whole)*100+Number(fraction.padEnd(2,'0')):null;
       const details={kishmish:kish.checked};Object.entries(fields).forEach(([key,input])=>details[key]=input.value);
-      await api('products/'+encodeURIComponent(product.id),{version:product.version,name:name.value,priceKop,stock:Number(stock.value),available:active.checked,details});dialog.close();await load();
+      await api('products/'+encodeURIComponent(product.id),{version:product.version,name:name.value,priceKop,priceConfirmed:confirmed.checked,characteristicsConfirmed:reviewed.checked,stock:Number(stock.value),available:active.checked,details});dialog.close();await load();
     });});$('editorBody').append(form);
   }
   async function editOrder(id) {
@@ -76,7 +80,23 @@
   async function products() {
     const results=el('div');let query=0;
     async function refresh(q='',filter='all'){const id=++query;try{const data=await api('products?'+new URLSearchParams({q,filter}));if(id!==query)return;results.replaceChildren(table(['Товар','Ціна','Залишок','Доступність',''],data.products.map(p=>[p.name,money(p.price_kop),p.stock,p.available?'Активний':'Прихований',button('Редагувати',()=>editProduct(p))])));}catch(error){notice(error.message,true);}}
-    const bar=searchToolbar([['all','Усі товари'],['active','Активні'],['inactive','Приховані'],['demo','Демонстраційні'],['empty','Нульовий залишок']],refresh,'Пошук за назвою або кодом');await refresh();return [bar,results];
+    const bar=searchToolbar([['all','Усі товари'],['active','Активні'],['inactive','Приховані'],['demo','Демонстраційні'],['empty','Нульовий залишок']],refresh,'Пошук за назвою або кодом');
+    const bulk=el('section',undefined,'card csv-tools');bulk.append(el('h2','Масове редагування CSV'),el('p','Завантажте актуальний файл усіх 107 сортів, внесіть зміни та перевірте перед імпортом. Ціна — у гривнях; підтвердження й доступність — 0 або 1. Фото не потрібні.','hint'));
+    bulk.append(button('Завантажити CSV',()=>saving(async()=>{const data=await api('catalog/export');const url=URL.createObjectURL(new Blob([data.csv],{type:'text/csv;charset=utf-8'})),link=el('a');link.href=url;link.download='loza-catalog.csv';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);})),button('Імпортувати CSV',()=>importCatalog()));
+    await refresh();return [bulk,bar,results];
+  }
+  function importCatalog(){
+    openEditor('Імпорт каталогу');const form=el('form'),file=field(form,'CSV-файл','',{type:'file'});file.accept='.csv,text/csv';file.required=true;
+    const message=el('p','Порожня ціна залишає «Ціну уточнюйте». Для продажу потрібні price_confirmed=1, available=1 і stock>0. Імпорт не змінює початкове джерело PDF.','hint'),preview=el('div'),status=el('p');status.setAttribute('role','status');
+    const check=el('button','Перевірити файл','primary');check.type='submit';let source='',result=null,key=null;
+    const apply=button('Застосувати імпорт',()=>saving(async()=>{if(!result)return;const data=await api('catalog/import',{csv:source,previewHash:result.previewHash},key);dialog.close();await load();return `Імпортовано ${data.count} товарів. Зміни записано в історію.`;}),true);apply.hidden=true;
+    file.addEventListener('change',()=>{result=null;source='';key=null;apply.hidden=true;preview.replaceChildren();status.textContent='';});
+    form.addEventListener('submit',e=>{e.preventDefault();saving(async()=>{
+      apply.hidden=true;result=null;const selected=file.files[0];if(!selected || selected.size>250000)throw new Error('Оберіть UTF-8 CSV до 250 КБ.');
+      source=await selected.text();result=await api('catalog/preview',{csv:source});key=crypto.randomUUID();
+      preview.replaceChildren(table(['Код / назва','Ціна','Залишок','Продаж'],result.rows.map(row=>[row.id+' · '+row.name,money(row.priceKop),row.stock,row.available?'Доступний':'Недоступний'])));
+      status.textContent=`Перевірено товарів: ${result.count}. Перегляньте дані перед збереженням.`;apply.hidden=false;
+    });});form.append(message,check,status,preview,apply);$('editorBody').append(form);
   }
   async function orders() {
     const results=el('div'),pagination=el('div',undefined,'pagination');let search='',status='',query=0;

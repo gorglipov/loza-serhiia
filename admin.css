@@ -464,3 +464,5 @@ label {
     }
   }
 }
+
+.csv-tools{margin-bottom:18px}.csv-tools button{margin:4px 8px 4px 0}.csv-tools .hint{max-width:70ch}#editor input[type=file]{max-width:100%;font-size:14px}#editor [role=status]{font-size:13px;color:#345334}#editor .table-wrap{max-height:45vh;overflow:auto;margin:12px 0}

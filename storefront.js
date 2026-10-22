@@ -2,7 +2,7 @@
   "use strict";
   const $ = selector => document.querySelector(selector);
   const money = new Intl.NumberFormat("uk-UA", { style: "currency", currency: "UAH" });
-  const price = kop => Number.isSafeInteger(kop) ? money.format(kop / 100) : "Ціну уточнюємо";
+  const price = kop => Number.isSafeInteger(kop) ? money.format(kop / 100) : "Ціну уточнюйте";
   const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
   const CART_KEY = "loza-cart-v2", PENDING_KEY = "loza-checkout-pending-v2";
   const timeoutSignal = milliseconds => {
@@ -93,26 +93,34 @@
     if (!catalogLoaded) return;
     const query = $("#search").value.trim().toLocaleLowerCase("uk");
     const ripening = $("#ripening").value.toLocaleLowerCase("uk");
-    const taste = $("#taste").value.toLocaleLowerCase("uk");
+    const color = $("#color").value;
+    const kishmish = $("#kishmish").value;
+    const minimum = $("#priceMin").value === "" ? null : Number($("#priceMin").value) * 100;
+    const maximum = $("#priceMax").value === "" ? null : Number($("#priceMax").value) * 100;
     const shown = products.filter(product => {
       const details = product.details || {};
-      return (!query || [product.name, details.color, details.taste].join(" ").toLocaleLowerCase("uk").includes(query)) &&
+      return (!query || product.name.toLocaleLowerCase("uk").includes(query)) &&
         (!ripening || String(details.ripening || "").toLocaleLowerCase("uk") === ripening) &&
-        (!taste || String(details.taste || "").toLocaleLowerCase("uk").includes(taste));
+        (!color || String(details.color || "").toLocaleLowerCase("uk") === color) &&
+        (!kishmish || Boolean(details.kishmish) === (kishmish === "1")) &&
+        (minimum === null || (product.priceKop !== null && product.priceKop >= minimum)) &&
+        (maximum === null || (product.priceKop !== null && product.priceKop <= maximum));
     });
     $("#count").textContent = `Показано: ${shown.length} із ${products.length}`;
     $("#catalogSize").textContent = String(products.length);
     $("#grid").innerHTML = shown.length ? shown.map(product => {
       const d = product.details || {}, quantity = quantityOf(product.id);
-      const available = product.available && product.stock > 0;
-      return `<article class="card is-visible${available ? "" : " unavailable"}" data-product-id="${esc(product.id)}">
-        <div class="cardhead"><span class="tag">${esc(d.ripening || "Виноградна лоза")}</span><span class="price">${esc(price(product.priceKop))}</span></div>
-        <h3 class="title">${esc(product.name)}</h3>${product.isDemo ? '<span class="store-badge">Демонстраційний товар</span>' : ""}
-        <p class="desc">${esc([d.color, d.taste].filter(Boolean).join(" · "))}</p>
-        <div class="facts"><div><b>Ягода</b>${esc(d.berry || "—")}</div><div><b>Форма</b>${esc(d.shape || "—")}</div><div><b>Морозостійкість</b>${esc(d.frost || "—")}</div><div><b>Ціна за штуку</b>${esc(price(product.priceKop))}</div></div>
+      const available = product.available && product.priceConfirmed && product.stock > 0;
+      return `<article class="card catalog-card is-visible${available ? "" : " unavailable"}" data-product-id="${esc(product.id)}">
+        <div class="cardhead"><span class="tag">${esc(d.ripening || "Потребує перевірки")}</span>${d.kishmish ? '<span class="kishmish-badge">Кишмиш</span>' : ""}</div>
+        <h3 class="title">${esc(product.name)}</h3>
+        <dl class="catalog-facts">${[["Колір",d.color],["Смак",d.taste],["Ягода",d.berry],["Форма",d.shape],["Морозостійкість",d.frost]].map(([label,value])=>`<div><dt>${esc(label)}</dt><dd>${esc(value || "Потребує перевірки")}</dd></div>`).join("")}</dl>
+        <p class="catalog-review">${product.characteristicsConfirmed ? "Характеристики підтверджено власником" : "Характеристики з каталогу · потребують перевірки"}</p>
+        <div class="catalog-price"><strong class="price">${esc(price(product.priceKop))}</strong>${product.priceKop !== null ? '<span>за лозу</span>' : ""}</div>
+        ${product.priceKop !== null && !product.priceConfirmed ? '<p class="catalog-price-note">Ціна з PDF · очікує підтвердження</p>' : ""}
         <p class="store-stock${available ? "" : " store-unavailable"}">${available ? `У наявності: ${product.stock} шт.` : "Немає в наявності"}</p>
         ${quantity ? `<div class="quantity-control"><button type="button" data-action="decrease" data-id="${esc(product.id)}" aria-label="Зменшити кількість ${esc(product.name)}" ${pending ? "disabled" : ""}>−</button><span><strong>${quantity}</strong><small>у кошику</small></span><button type="button" data-action="increase" data-id="${esc(product.id)}" aria-label="Збільшити кількість ${esc(product.name)}" ${pending || !available || quantity >= Math.min(5, product.stock) ? "disabled" : ""}>+</button></div>` :
-          `<button class="add" type="button" data-action="increase" data-id="${esc(product.id)}" ${pending || !available ? "disabled" : ""}>${available ? "Додати до кошика" : "Немає в наявності"}</button>`}
+          `<button class="add" type="button" data-action="increase" data-id="${esc(product.id)}" ${pending || !available ? "disabled" : ""}>${available ? "Додати до кошика" : product.priceKop === null ? "Ціну уточнюйте" : !product.priceConfirmed ? "Ціна очікує підтвердження" : "Немає в наявності"}</button>`}
       </article>`;
     }).join("") : '<p class="store-load">За цими умовами товарів не знайдено.</p>';
     $("#varietySuggestions").innerHTML = query ? products.filter(product => product.name.toLocaleLowerCase("uk").startsWith(query)).slice(0, 10).map(product => `<option value="${esc(product.name)}"></option>`).join("") : "";
@@ -326,12 +334,14 @@
       if (!Array.isArray(result.products)) throw new Error("Не вдалося завантажити товари.");
       products = result.products.filter(product => validId(product.id) && typeof product.name === "string");
       catalogLoaded = true;
-      const selected = $("#ripening").value;
-      const terms = [...new Set(products.map(product => product.details?.ripening).filter(value => typeof value === "string"))];
-      $("#ripening").innerHTML = '<option value="">Усі терміни дозрівання</option>' + terms.map(term => `<option value="${esc(term)}">${esc(term)}</option>`).join("");
-      if (terms.includes(selected)) $("#ripening").value = selected;
-      const demoOnly = products.length && products.every(product => product.isDemo);
-      $("#storeNotice").textContent = demoOnly ? "Демонстраційний каталог. Ціни та залишки тестові. Оплата вимкнена." : "Оплата вимкнена. Після оформлення замовлення очікує підтвердження продавцем.";
+      for (const [id,key,title] of [["ripening","ripening","Усі терміни"],["color","color","Усі кольори"]]) {
+        const select = $("#"+id), selected = select.value;
+        const terms = new Map();
+        for (const product of products) { const value = product.details?.[key]; if (typeof value === "string" && value) terms.set(value.toLocaleLowerCase("uk"),value); }
+        select.innerHTML = `<option value="">${title}</option>` + [...terms].sort((a,b)=>a[0].localeCompare(b[0],"uk")).map(([value,label])=>`<option value="${esc(value)}">${esc(label)}</option>`).join("");
+        if (terms.has(selected)) select.value = selected;
+      }
+      $("#storeNotice").textContent = "Ціни й характеристики перенесені з каталогу власника. Купівля доступна після підтвердження ціни та залишку. Онлайн-оплата вимкнена.";
       renderCatalog();
       if (initial) scheduleQuote();
     } catch (error) {
@@ -348,7 +358,9 @@
   });
   $("#search").addEventListener("input", renderCatalog);
   $("#ripening").addEventListener("change", renderCatalog);
-  $("#taste").addEventListener("change", renderCatalog);
+  for (const id of ["color","kishmish"]) $("#"+id).addEventListener("change", renderCatalog);
+  for (const id of ["priceMin","priceMax"]) $("#"+id).addEventListener("input", renderCatalog);
+  $("#resetFilters").addEventListener("click", () => { for (const id of ["search","ripening","color","kishmish","priceMin","priceMax"]) $("#"+id).value = ""; renderCatalog(); });
   $("#openCart").addEventListener("click", openCart);
   $("#closeCart").addEventListener("click", closeCart);
   $("#toastCart").addEventListener("click", openCart);

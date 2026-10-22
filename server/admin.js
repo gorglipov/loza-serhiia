@@ -1,6 +1,7 @@
 import {body,db,endpoint,json,rateLimit,StoreError} from './checkout.js';
 import {issueCsrf} from './access.js';
 import {deliverPending,telegramConfigured,STATUS_LABELS} from './telegram.js';
+import {catalogApi} from './catalog.js';
 const invalid=()=>new StoreError('INVALID_ADMIN_INPUT','Перевірте введені значення.');
 const int=(v,max=100000000)=>Number.isSafeInteger(v) && v>=0 && v<=max;
 const clean=(v,min,max)=> {
@@ -9,7 +10,8 @@ const clean=(v,min,max)=> {
 };
 export function productInput(input) {
   if(!int(input.version) || !(input.priceKop===null || (int(input.priceKop) && input.priceKop>0)) ||
-    !int(input.stock,1000000) || typeof input.available!=='boolean' || (input.available && input.priceKop===null) ||
+    !int(input.stock,1000000) || typeof input.available!=='boolean' || typeof input.priceConfirmed!=='boolean' || typeof input.characteristicsConfirmed!=='boolean' ||
+    (input.priceConfirmed && input.priceKop===null) || (input.available && (!input.priceConfirmed || input.priceKop===null || input.stock===0)) ||
     !input.details || typeof input.details!=='object' || Array.isArray(input.details)) throw invalid();
   const details={};
   for(const key of Object.keys(input.details)) {
@@ -17,7 +19,8 @@ export function productInput(input) {
     if(key==='kishmish') { if(typeof input.details[key]!=='boolean') throw invalid(); details[key]=input.details[key]; }
     else details[key]=clean(input.details[key],0,500);
   }
-  return {name:clean(input.name,2,160),priceKop:input.priceKop,stock:input.stock,available:input.available?1:0,detailsJson:JSON.stringify(details)};
+  return {name:clean(input.name,2,160),priceKop:input.priceKop,stock:input.stock,available:input.available?1:0,
+    priceConfirmed:input.priceConfirmed?1:0,characteristicsConfirmed:input.characteristicsConfirmed?1:0,detailsJson:JSON.stringify(details)};
 }
 function commandId(request) {
   const id=request.headers.get('Idempotency-Key');
@@ -36,10 +39,11 @@ async function mutate(database,request,actor,kind,target,version,payload) {
     if(matches(saved)) return;
     if(String(error.message).includes('LOZA_VERSION_CONFLICT')) throw new StoreError('VERSION_CONFLICT','Дані змінилися. Оновіть сторінку перед редагуванням.',409);
     if(String(error.message).includes('LOZA_INVALID_TRANSITION')) throw new StoreError('INVALID_TRANSITION','Ця зміна статусу недоступна. Оновіть замовлення.',409);
+    if(String(error.message).includes('LOZA_PRICE_NOT_CONFIRMED')) throw new StoreError('PRICE_NOT_CONFIRMED','Підтвердьте ціну реального товару та перевірте залишок.',400);
     throw error;
   }
 }
-function product(row) { const {details_json,...data}=row; return {...data,details:JSON.parse(details_json)}; }
+function product(row) { const {details_json,source_json,...data}=row; return {...data,details:JSON.parse(details_json),source:source_json?JSON.parse(source_json):null}; }
 export async function adminApi(context) {
   const method=context.request.method;
   return endpoint(context,method,async()=> {
@@ -50,6 +54,7 @@ export async function adminApi(context) {
     await rateLimit(context,database,'admin',method==='GET'?180:30);
     const url=new URL(context.request.url), route=url.pathname.replace(/^\/api\/admin\/?/,'').replace(/\/$/,'');
     const actor=context.data.admin.email;
+    if(route.startsWith('catalog/')) return catalogApi(context,database,route,actor,productInput,commandId);
     if(method==='GET' && route==='session') return json({success:true,email:actor,csrfToken:await issueCsrf(context.request,context.env,context.data.admin),statuses:STATUS_LABELS});
     if(method==='GET' && route==='dashboard') {
       const [products,counts]=await Promise.all([
@@ -61,7 +66,8 @@ export async function adminApi(context) {
     if(method==='GET' && route==='products') {
       const q=clean(url.searchParams.get('q') || '',0,100),filter=url.searchParams.get('filter') || 'all';
       if(!['all','active','inactive','demo','empty'].includes(filter)) throw invalid();
-      const result=await database.prepare(`SELECT p.*,v.version FROM products p JOIN admin_product_versions v ON v.product_id=p.id
+      const result=await database.prepare(`SELECT p.*,v.version,c.confirmed_price_kop,c.characteristics_confirmed,c.source_json
+        FROM products p JOIN admin_product_versions v ON v.product_id=p.id LEFT JOIN product_catalog c ON c.product_id=p.id
         WHERE (?='all' OR (?='active' AND p.available=1) OR (?='inactive' AND p.available=0) OR
         (?='demo' AND p.is_demo=1) OR (?='empty' AND p.stock=0)) ORDER BY p.name`)
         .bind(filter,filter,filter,filter,filter).all();
