@@ -1,20 +1,37 @@
 // Durable, PII-free outbox. Never log Telegram URLs, token values or response bodies.
 export const STATUS_LABELS={pending:'Очікує підтвердження',confirmed:'Підтверджено',shipped:'Відправлено',completed:'Виконано',cancelled:'Скасовано'};
 export const telegramConfigured=env=>typeof env.TELEGRAM_BOT_TOKEN==='string' && /^\d+:[A-Za-z0-9_-]+$/.test(env.TELEGRAM_BOT_TOKEN) && typeof env.TELEGRAM_CHAT_ID==='string' && /^-?\d+$/.test(env.TELEGRAM_CHAT_ID);
+// SQLite CURRENT_TIMESTAMP is UTC; show order creation time consistently in Ukraine.
+export function formatKyivTimestamp(value) {
+  if(typeof value!=='string' || !value.trim())return null;
+  const utc=/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}$/.test(value)
+    ? value.replace(' ','T')+'Z' : value;
+  const stamp=new Date(utc);
+  if(Number.isNaN(stamp.getTime()))return null;
+  const formatter=new Intl.DateTimeFormat('uk-UA',{
+    timeZone:'Europe/Kyiv',year:'numeric',month:'2-digit',day:'2-digit',
+    hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'
+  });
+  const parts=Object.fromEntries(formatter.formatToParts(stamp).filter(p=>p.type!=='literal').map(p=>[p.type,p.value]));
+  return parts.day+'.'+parts.month+'.'+parts.year+', '+parts.hour+':'+parts.minute+':'+parts.second;
+}
+
 export function queueOrder(database,id) {
   return database.prepare(`INSERT OR IGNORE INTO telegram_outbox(event_key,order_id,kind)
     SELECT ?,?,'order' WHERE (SELECT enabled FROM telegram_settings WHERE id=1)=1`).bind('order:'+id,id);
 }
 async function message(database,event) {
   if(event.kind==='test') return '✅ Тестове повідомлення LOZA\nTelegram-сповіщення підключено. Персональні дані покупців не надсилаються.';
-  const order=await database.prepare('SELECT o.id,o.amount_kop,o.status,c.comment FROM orders o LEFT JOIN order_checkout c ON c.order_id=o.id WHERE o.id=?').bind(event.order_id).first();
+  const order=await database.prepare('SELECT o.id,o.amount_kop,o.status,c.comment,c.created_at FROM orders o LEFT JOIN order_checkout c ON c.order_id=o.id WHERE o.id=?').bind(event.order_id).first();
   const items=await database.prepare('SELECT product_name,quantity FROM order_items WHERE order_id=? ORDER BY product_id').bind(event.order_id).all();
   if(!order || !items.results.length) throw new Error('ORDER_DATA_UNAVAILABLE');
   const payment=/^\[LOZA_PAYMENT:(full|deposit_cod)\] /.exec(order.comment||'')?.[1];
   const paymentLines=payment==='deposit_cod' && order.amount_kop>=10000
     ? ['Умови: передоплата 100 грн + післяплата '+((order.amount_kop-10000)/100).toFixed(2)+' грн']
     : payment==='full' ? ['Умови: повна передоплата '+(order.amount_kop/100).toFixed(2)+' грн'] : [];
-  return ['🛒 Нове замовлення LOZA','Номер: #'+order.id,'Товари:',...items.results.map(i=>i.product_name+' × '+i.quantity),
+  return ['🛒 Нове замовлення LOZA','Номер: #'+order.id,
+    'Дата й час: '+(formatKyivTimestamp(order.created_at) || 'невідомі')+' (Київ)',
+    'Товари:',...items.results.map(i=>i.product_name+' × '+i.quantity),
     'Сума: '+(order.amount_kop/100).toFixed(2)+' грн',...paymentLines,
     'Оплата: не перевірена','Статус: '+(STATUS_LABELS[order.status] || 'Оновлено')].join('\n').slice(0,4096);
 }

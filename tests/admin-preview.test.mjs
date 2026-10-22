@@ -2,6 +2,7 @@
 import {test,before,beforeEach,after} from 'node:test';
 import assert from 'node:assert/strict';
 import {paymentBreakdown,normalizeOrder} from '../server/checkout.js';
+import {formatKyivTimestamp} from '../server/telegram.js';
 import {readFile} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
 import {webcrypto} from 'node:crypto';
@@ -77,6 +78,8 @@ before(async()=>{
   await db.prepare("INSERT INTO orders(id,amount_kop,status) VALUES('LEGACY-CANCELLED',10000,'cancelled')").run();
   await db.prepare("INSERT INTO admin_stock_returns(order_id) VALUES('LEGACY-CANCELLED')").run();
   await apply('migrations/0005_manual_availability.sql');await apply('migrations/0005_manual_availability.sql');
+  await apply('migrations/0009_payment_tracking.sql');await apply('migrations/0009_payment_tracking.sql');
+  await apply('migrations/0010_payment_audit_guards.sql');await apply('migrations/0010_payment_audit_guards.sql');
   token=await jwt();const session=await json('/api/admin/session');assert.equal(session.status,200);csrf=session.data.csrfToken;
 });
 after(async()=>{if(mf)await mf.dispose();});
@@ -129,7 +132,7 @@ test('private HTML and every admin API fail closed without a verified Access JWT
 });
 test('every administrative mutation requires signed Access identity and CSRF before side effects',async()=>{
   const before=await db.prepare('SELECT COUNT(*) n FROM admin_mutations').first(),outbox=await db.prepare('SELECT COUNT(*) n FROM telegram_outbox').first();
-  const routes=['products/loza-002','products/loza-002/availability','orders/LEGACY-1/status','telegram/settings','telegram/test','telegram/retry','catalog/preview','catalog/import'];
+  const routes=['products/loza-002','products/loza-002/availability','orders/LEGACY-1/status','orders/LEGACY-1/payment','telegram/settings','telegram/test','telegram/retry','catalog/preview','catalog/import'];
   for(const route of routes){
     for(const options of [{auth:null},{auth:'untrusted-jwt'},{auth:await jwt({email:'outsider@example.test'})},{csrfToken:''},{headers:{Origin:'https://evil.test'}}]){
       const response=await request('/api/admin/'+route,{data:{},...options});assert.equal(response.status,403,route);assert.match(response.headers.get('Cache-Control'),/no-store/);
@@ -181,6 +184,12 @@ test('payment options use trusted integer kopecks and reject invalid deposit amo
   assert.equal(normalizeOrder(checkout).payment.mode,'deposit_cod');
   assert.throws(()=>normalizeOrder({...checkout,payment:{mode:'invalid'}}),/Оберіть/);
 });
+test('order timestamps reflect Europe/Kyiv in both summer and winter, not the browser timezone',()=>{
+  assert.equal(formatKyivTimestamp('2026-10-22 21:45:31'),'23.10.2026, 00:45:31');
+  assert.equal(formatKyivTimestamp('2026-12-22 21:45:31'),'22.12.2026, 23:45:31');
+  assert.equal(formatKyivTimestamp('2026-07-15 21:45:31'),'16.07.2026, 00:45:31');
+  assert.equal(formatKyivTimestamp(null),null);
+});
 test('order commit queues one message; concurrent replay never creates duplicate orders/events',async()=>{
   const key=crypto.randomUUID();const response=await json('/api/orders/create',{data:{...checkout,amountKop:1},key});assert.equal(response.status,201);orderId=response.data.orderId;assert.equal(response.data.amountKop,30000);assert.deepEqual(response.data.payment,{mode:'deposit_cod',advanceKop:10000,codKop:20000});assert.equal(response.data.paymentVerified,false);
   await Promise.all([json('/api/orders/create',{data:checkout,key}),json('/api/orders/create',{data:checkout,key})]);await settle();
@@ -190,9 +199,82 @@ test('order commit queues one message; concurrent replay never creates duplicate
   assert.ok(savedPayment.comment.endsWith('Private comment'));
   assert.equal((await db.prepare("SELECT COUNT(*) n FROM telegram_outbox WHERE order_id=?").bind(orderId).first()).n,1);
   const event=await db.prepare('SELECT state,message_id FROM telegram_outbox WHERE order_id=?').bind(orderId).first();assert.equal(event.state,'sent');
-  const text=sent.find(x=>x.text.includes(orderId))?.text;assert.ok(text);assert.match(text,/× 2/);assert.match(text,/300.00 грн/);assert.match(text,/Передоплата 100 грн|передоплата 100 грн/);assert.match(text,/Оплата: не перевірена/);
+  const text=sent.find(x=>x.text.includes(orderId))?.text;assert.ok(text);
+  const storedTime=await db.prepare('SELECT created_at FROM order_checkout WHERE order_id=?').bind(orderId).first();
+  assert.ok(storedTime.created_at);
+  assert.ok(text.includes('Дата й час: '+formatKyivTimestamp(storedTime.created_at)+' (Київ)'));
+  assert.match(text,/× 2/);assert.match(text,/300.00 грн/);assert.match(text,/Передоплата 100 грн|передоплата 100 грн/);assert.match(text,/Оплата: не перевірена/);
   for(const pii of ['Preview Buyer','380991234567','Preview City','Private delivery','Private comment'])assert.ok(!text.includes(pii));
   assert.equal(sent.filter(x=>x.text.includes(orderId)).length,1);
+});
+test('payment ledger: new order starts unpaid; admin alone can report, manually verify and audit the advance independently',async()=>{
+  const response=await json('/api/orders/create',{data:{...checkout,paymentVerified:true}});
+  assert.equal(response.status,201);
+  const id=response.data.orderId;
+  const detail=await json('/api/admin/orders/'+id);
+  assert.equal(detail.status,200);
+  assert.equal(detail.data.paymentReady,true);
+  assert.deepEqual(detail.data.paymentTerms,{mode:'deposit_cod',advanceKop:10000,codKop:20000});
+  assert.equal(detail.data.payment.state,'awaiting');
+  assert.equal(detail.data.payment.version,0);
+  const listed=await json('/api/admin/orders?status=&q=&offset=0');
+  assert.equal(listed.data.paymentReady,true);
+  assert.equal(listed.data.orders.find(o=>o.id===id).payment_state,'awaiting');
+  const listEntry=listed.data.orders.find(o=>o.id===id);
+  const detailTimestamp=detail.data.order.created_at;
+  assert.ok(detailTimestamp);
+  assert.equal(listEntry.created_at,detailTimestamp);
+  assert.ok(formatKyivTimestamp(detailTimestamp));
+  // Buyer-supplied "paymentVerified" never changes the server's verified state.
+  assert.equal((await db.prepare('SELECT state FROM loza_payment_states WHERE order_id=?').bind(id).first()).state,'awaiting');
+  assert.equal((await json('/api/admin/orders/'+id+'/payment',{auth:null,data:{version:0,state:'confirmed',confirmedAfterBankCheck:true}})).status,403);
+  assert.equal((await json('/api/admin/orders/'+id+'/payment',{data:{version:0,state:'confirmed',confirmedAfterBankCheck:false}})).status,400);
+  const key=crypto.randomUUID();
+  let r=await json('/api/admin/orders/'+id+'/payment',{data:{version:0,state:'reported'},key});
+  assert.equal(r.status,200);assert.equal(r.data.payment.state,'reported');assert.equal(r.data.payment.version,1);
+  r=await json('/api/admin/orders/'+id+'/payment',{data:{version:0,state:'reported'},key});
+  assert.equal(r.status,200);assert.equal(r.data.payment.version,1);
+  assert.equal((await json('/api/admin/orders/'+id+'/payment',{data:{version:0,state:'not_paid'}})).status,409);
+  const next=await json('/api/admin/orders/'+id+'/payment',{data:{version:1,state:'confirmed',confirmedAfterBankCheck:true}});
+  assert.equal(next.status,200);assert.equal(next.data.payment.version,2);assert.equal(next.data.payment.state,'confirmed');
+  const tracked=await db.prepare('SELECT * FROM loza_payment_states WHERE order_id=?').bind(id).first();
+  assert.equal(tracked.state,'confirmed');assert.equal(tracked.updated_by,admin);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM loza_payment_actions WHERE order_id=?').bind(id).first()).n,2);
+  const intact=await db.prepare('SELECT amount_kop,status FROM orders WHERE id=?').bind(id).first();
+  assert.deepEqual({amount:intact.amount_kop,status:intact.status},{amount:30000,status:'pending'});
+  const original=await db.prepare('SELECT comment FROM order_checkout WHERE order_id=?').bind(id).first();
+  assert.match(original.comment,/^\[LOZA_PAYMENT:deposit_cod\] /);
+});
+test('payment conflicts, concurrent retries, corrections and immutable audit preserve checkout',async()=>{
+  const created=await json('/api/orders/create',{data:checkout});assert.equal(created.status,201);
+  const id=created.data.orderId,path='/api/admin/orders/'+id+'/payment';
+  const snapshot=async()=>({order:await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first(),checkout:await db.prepare('SELECT * FROM order_checkout WHERE order_id=?').bind(id).first()});
+  const original=await snapshot();
+  for(const version of [-1,0.5,'0',null,100000001])assert.equal((await json(path,{data:{version,state:'reported'}})).status,400);
+  for(const flag of [undefined,false,1,'true'])assert.equal((await json(path,{data:{version:0,state:'confirmed',confirmedAfterBankCheck:flag}})).status,400);
+  assert.equal((await json(path,{data:{version:0,state:'awaiting'}})).status,409);
+  const key=crypto.randomUUID(),payload={version:0,state:'reported'};
+  const replay=await Promise.all([json(path,{data:payload,key}),json(path,{data:payload,key})]);assert.deepEqual(replay.map(r=>r.status),[200,200]);
+  assert.equal((await json(path,{data:{version:0,state:'not_paid'},key})).status,409);
+  const race=await Promise.all(['not_paid','confirmed'].map(state=>json(path,{data:{version:1,state,confirmedAfterBankCheck:true}})));assert.deepEqual(race.map(r=>r.status).sort(),[200,409]);
+  assert.equal((await json(path,{data:{version:2,state:'awaiting'}})).status,200);
+  // Replaying an old accepted action must not overwrite the later correction.
+  const old=await json(path,{data:payload,key});assert.equal(old.status,200);assert.equal(old.data.payment.state,'awaiting');assert.equal(old.data.payment.version,3);
+  const actions=(await json('/api/admin/audit')).data.payments.filter(r=>r.order_id===id);assert.equal(actions.length,3);assert.ok(actions.every(r=>r.actor===admin));
+  assert.equal(actions.find(r=>r.expected_version===0).previous_state,'awaiting');
+  await assert.rejects(db.prepare('UPDATE loza_payment_actions SET actor=? WHERE id=?').bind('other',key).run(),/IMMUTABLE/);
+  await assert.rejects(db.prepare('DELETE FROM loza_payment_actions WHERE id=?').bind(key).run(),/IMMUTABLE/);
+  await apply('migrations/0009_payment_tracking.sql');await apply('migrations/0010_payment_audit_guards.sql');
+  assert.deepEqual(await snapshot(),original);
+});
+test('invalid historical payment totals cannot be manually confirmed',async()=>{
+  for(const amount of [9900,0,-100,10000.5]){
+    const r=await json('/api/orders/create',{data:checkout});assert.equal(r.status,201);const id=r.data.orderId;
+    await db.prepare('UPDATE orders SET amount_kop=? WHERE id=?').bind(amount,id).run();
+    const result=await json('/api/admin/orders/'+id+'/payment',{data:{version:0,state:'confirmed',confirmedAfterBankCheck:true}});assert.equal(result.status,409);
+    assert.equal((await db.prepare('SELECT version FROM loza_payment_states WHERE order_id=?').bind(id).first()).version,0);
+  }
+  for(const amount of [NaN,Infinity,1.5,-1,0,Number.MAX_SAFE_INTEGER+1])assert.throws(()=>paymentBreakdown(amount,'full'));
 });
 test('optimistic product updates reject stale versions and SQL injection is data',async()=>{
   const row=await db.prepare("SELECT p.*,v.version FROM products p JOIN admin_product_versions v ON v.product_id=p.id WHERE p.id='loza-002'").first();
@@ -459,4 +541,59 @@ test('every one of the 107 real varieties can be switched both ways through the 
       assert.equal((await db.prepare('SELECT COUNT(*) n FROM admin_audit_log WHERE mutation_id=?').bind(key).first()).n,1);
     }
   }
+});
+
+test('payment confirmation dialog cancellation has no effect; explicit acceptance changes only payment',{skip:!process.env.LOZA_PLAYWRIGHT_MODULE,timeout:25000},async()=>{
+  const created=await json('/api/orders/create',{data:{...checkout,items:[{productId:'loza-004',quantity:2}]}});assert.equal(created.status,201);const id=created.data.orderId;
+  const {chromium}=await import(pathToFileURL(process.env.LOZA_PLAYWRIGHT_MODULE).href),browser=await chromium.launch({channel:'msedge',headless:true});
+  try{
+    const page=await browser.newPage({viewport:{width:390,height:900},extraHTTPHeaders:{'Cf-Access-Jwt-Assertion':token}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
+    await page.goto((await mf.ready).origin+'/admin');await page.getByRole('heading',{name:'Замовлення за статусами'}).waitFor();await page.getByRole('button',{name:'Замовлення',exact:true}).click();
+    const stored=await db.prepare('SELECT created_at FROM order_checkout WHERE order_id=?').bind(id).first();
+    const expectedKyiv=formatKyivTimestamp(stored.created_at);
+    assert.ok(expectedKyiv);
+    await page.getByRole('columnheader',{name:'Дата й час (Київ)'}).waitFor({state:'visible'});
+    const orderRow=page.getByRole('row').filter({hasText:id});
+    const rowText=await orderRow.innerText();
+    assert.ok(rowText.includes(expectedKyiv.split(', ')[0]));
+    assert.ok(rowText.includes(expectedKyiv.split(', ')[1]));
+    assert.ok(rowText.includes('за Києвом'));
+    await orderRow.getByRole('button',{name:'Деталі'}).click();
+    await page.getByRole('dialog').getByText(expectedKyiv+' (Київ)',{exact:true}).waitFor({state:'visible'});
+    page.setDefaultTimeout(8000);
+    const select=page.getByLabel('Статус оплати',{exact:true});await select.selectOption('confirmed');
+    page.once('dialog',d=>d.dismiss());await page.getByRole('button',{name:'Зберегти статус оплати'}).click();
+    assert.equal((await db.prepare('SELECT state FROM loza_payment_states WHERE order_id=?').bind(id).first()).state,'awaiting');
+    page.once('dialog',d=>d.accept());await page.getByRole('button',{name:'Зберегти статус оплати'}).click();await page.getByRole('dialog').waitFor({state:'hidden'});
+    assert.equal((await db.prepare('SELECT state FROM loza_payment_states WHERE order_id=?').bind(id).first()).state,'confirmed');
+    const order=await db.prepare('SELECT amount_kop,status FROM orders WHERE id=?').bind(id).first();assert.equal(order.amount_kop,created.data.amountKop);assert.equal(order.status,'pending');assert.deepEqual(errors,[]);
+  }finally{await browser.close();}
+});
+
+test('installed 0009 stays readable while missing audit guards block writes',async()=>{
+  await db.prepare("DELETE FROM loza_store_migrations WHERE version='0010_payment_audit_guards'").run();
+  try{
+    assert.equal((await json('/api/admin/orders')).status,200);
+    const result=await json('/api/admin/orders/LEGACY-1/payment',{data:{version:0,state:'confirmed',confirmedAfterBankCheck:true}});assert.equal(result.status,503);assert.equal(result.data.code,'PAYMENT_MIGRATION_REQUIRED');
+  }finally{await apply('migrations/0010_payment_audit_guards.sql');}
+});
+
+// The browser clock must never change the Kyiv rendering of D1's UTC timestamp.
+test('Kyiv order table and details agree in summer and winter from a Los Angeles browser',{skip:!process.env.LOZA_PLAYWRIGHT_MODULE,timeout:30000},async()=>{
+  const created=await json('/api/orders/create',{data:{...checkout,items:[{productId:'loza-004',quantity:2}]}});assert.equal(created.status,201);const id=created.data.orderId;
+  const {chromium}=await import(pathToFileURL(process.env.LOZA_PLAYWRIGHT_MODULE).href),browser=await chromium.launch({channel:'msedge',headless:true});
+  try{
+    for(const width of [390,1440])for(const [utc,expected] of [['2026-07-15 21:45:31','16.07.2026, 00:45:31'],['2026-12-22 21:45:31','22.12.2026, 23:45:31']]){
+      await db.prepare('UPDATE order_checkout SET created_at=? WHERE order_id=?').bind(utc,id).run();
+      const page=await browser.newPage({viewport:{width,height:900},timezoneId:'America/Los_Angeles',extraHTTPHeaders:{'Cf-Access-Jwt-Assertion':token}}),errors=[];
+      page.on('pageerror',e=>errors.push(e.message));page.setDefaultTimeout(8000);
+      await page.goto((await mf.ready).origin+'/admin');await page.getByRole('heading',{name:'Замовлення за статусами'}).waitFor();await page.getByRole('button',{name:'Замовлення',exact:true}).click();
+      await page.getByRole('columnheader',{name:'Дата й час (Київ)'}).waitFor();
+      // Search also covers winter timestamps sorted ahead of the present date.
+      await page.getByRole('searchbox').fill(id);const row=page.getByRole('row').filter({hasText:id});await row.waitFor();
+      const clock=row.locator('.order-clock');assert.equal(await clock.locator('strong').innerText(),expected.split(', ')[0]);assert.equal(await clock.locator('span').innerText(),expected.split(', ')[1]);assert.equal(await clock.locator('small').innerText(),'за Києвом');
+      await row.getByRole('button',{name:'Деталі'}).click();await page.getByRole('dialog').getByText(expected+' (Київ)',{exact:true}).waitFor();
+      assert.deepEqual(errors,[]);assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.close();
+    }
+  }finally{await browser.close();}
 });
