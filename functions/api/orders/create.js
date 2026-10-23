@@ -14,7 +14,7 @@ export const onRequest = context => endpoint(context, "POST", async context => {
   if (existing) {
     if (existing.payload_hash !== payloadHash) throw new StoreError("IDEMPOTENCY_CONFLICT", "Попередній запит уже прийнято з іншими даними. Перевірте його підтвердження.", 409);
     scheduleNotifications(context,database);
-    return receipt(existing);
+    return receipt(existing, 200, context.env);
   }
 
   await verifyTurnstile(context, input.turnstileToken);
@@ -46,7 +46,7 @@ export const onRequest = context => endpoint(context, "POST", async context => {
     if (saved) {
       if (saved.payload_hash !== payloadHash) throw new StoreError("IDEMPOTENCY_CONFLICT", "Попередній запит уже прийнято з іншими даними. Перевірте його підтвердження.", 409);
       scheduleNotifications(context,database);
-      return receipt(saved);
+      return receipt(saved, 200, context.env);
     }
     if (String(error.message).includes("LOZA_STOCK_UNAVAILABLE")) throw new StoreError("STOCK_UNAVAILABLE", "Наявність або ціна змінилася. Оновіть кошик і повторіть спробу.", 409);
     throw error;
@@ -54,5 +54,5 @@ export const onRequest = context => endpoint(context, "POST", async context => {
   const saved = await findReceipt(database, keyHash);
   if (!saved) throw new Error("Receipt unavailable");
   scheduleNotifications(context,database);
-  return receipt(saved, 201);
+  return receipt(saved, 201, context.env);
 });

@@ -216,7 +216,28 @@ export async function findReceipt(database, keyHash) {
     FROM order_checkout c JOIN orders o ON o.id = c.order_id WHERE c.request_key_hash = ?`).bind(keyHash).first();
 }
 
-export function receipt(row, status = 200) {
+// Manual card transfers happen outside LOZA. A receipt capability (Idempotency-Key)
+// is required to retrieve instructions; no card number is stored in GitHub or D1.
+export function manualTransferForReceipt(row, env) {
+  if (!row || !env || env.MANUAL_TRANSFER_ENABLED !== "true" || row.demo_only) return null;
+  const terms = paymentFromStored(row.comment, row.amount_kop);
+  const card = typeof env.MANUAL_TRANSFER_CARD === "string"
+    ? env.MANUAL_TRANSFER_CARD.replace(/[\s-]/g, "")
+    : "";
+  if (!/^\d{16,19}$/.test(card) || !terms.mode || !Number.isSafeInteger(terms.advanceKop) || terms.advanceKop < 1) return null;
+  // Reject accidentally mistyped card numbers (Luhn checksum).
+  let sum = 0;
+  for (let i = card.length - 1, position = 0; i >= 0; i--, position++) {
+    let digit = Number(card[i]);
+    if (position % 2) { digit *= 2; if (digit > 9) digit -= 9; }
+    sum += digit;
+  }
+  if (sum % 10 !== 0) return null;
+  return { card, amountKop: terms.advanceKop, reference: row.id };
+}
+
+export function receipt(row, status = 200, env = null) {
   // No customer, phone, delivery or comments are returned, even to key holders.
-  return json({ success: true, orderId: row.id, amountKop: row.amount_kop, amount: row.amount_kop / 100, currency: "UAH", status: row.status, statusLabel: row.status === "pending" ? "Очікує підтвердження" : "Статус оновлено продавцем", payment: paymentFromStored(row.comment, row.amount_kop), paymentVerified: false, testOnly: Boolean(row.demo_only), paymentsEnabled: false }, status);
+  // Manual transfer details are available only after a valid private receipt lookup.
+  return json({ success: true, orderId: row.id, amountKop: row.amount_kop, amount: row.amount_kop / 100, currency: "UAH", status: row.status, statusLabel: row.status === "pending" ? "Очікує підтвердження" : "Статус оновлено продавцем", payment: paymentFromStored(row.comment, row.amount_kop), paymentVerified: false, testOnly: Boolean(row.demo_only), paymentsEnabled: false, manualTransfer: manualTransferForReceipt(row, env) }, status);
 }

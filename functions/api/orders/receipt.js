@@ -7,5 +7,5 @@ export const onRequest = context => endpoint(context, "POST", async context => {
   await body(context.request);
   const row = await findReceipt(database, await requestKey(context.request));
   if (!row) return json({ success: false, code: "NOT_FOUND", error: "Підтвердження ще не знайдено. Можна повторити надсилання з тим самим ключем." }, 404);
-  return receipt(row);
+  return receipt(row, 200, context.env);
 });

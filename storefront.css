@@ -41,6 +41,9 @@ button:disabled{cursor:not-allowed;opacity:.6}
 .store-recovery p{margin:0;font-size:13px}.store-recovery button{background:var(--paper);border:1px solid #bacbb2;border-radius:10px;color:var(--green);font-weight:650}
 .store-receipt{display:grid;gap:14px;padding:12px 0}.store-receipt h3{margin:0;color:var(--green);font:26px Georgia,serif}
 .store-receipt dl{display:grid;gap:12px;margin:0;padding:16px;border:1px solid #d7dfca;border-radius:12px;background:#edf2e7}
+.store-manual-transfer{display:grid;gap:12px;padding:16px;border:1px solid #c4d5b6;border-radius:12px;background:#f2f6eb}
+.store-manual-transfer h4{margin:0;color:var(--green);font-size:16px}
+.store-manual-transfer dd{overflow-wrap:anywhere}
 .store-receipt dt{font-size:12px;color:var(--muted)}.store-receipt dd{margin:3px 0 0;font-weight:700;overflow-wrap:anywhere}.store-receipt .store-order-id{font:13px/1.6 ui-monospace,monospace}
 .store-form [hidden],.panel [hidden],[hidden].store-receipt,[hidden].store-recovery{display:none!important}
 .store-form .store-consent{font-weight:400;font-size:12px;color:var(--muted)}

@@ -72,7 +72,13 @@ html{scroll-behavior:smooth}
   <section class="store-receipt" id="storeReceipt" aria-labelledby="storeReceiptTitle" hidden>
     <h3 id="storeReceiptTitle" tabindex="-1">Замовлення створено</h3>
     <dl><div><dt>Номер замовлення</dt><dd id="storeOrderNumber" class="store-order-id"></dd></div><div><dt>Сума за товарами</dt><dd id="storeOrderAmount"></dd></div><div><dt>Статус</dt><dd id="storeOrderStatus">Очікує підтвердження</dd></div></dl>
-    <p id="storeReceiptPayment" class="store-help">Умови оплати очікують узгодження з продавцем.</p><p class="store-help">Замовлення створено, але переказ не здійснювався через сайт і надходження коштів не перевірено.</p>
+    <p id="storeReceiptPayment" class="store-help">Умови оплати очікують узгодження з продавцем.</p>
+    <section class="store-manual-transfer" id="storeManualTransfer" aria-label="Реквізити для ручної передоплати" hidden>
+      <h4>Передоплата переказом на картку</h4>
+      <dl><div><dt>Картка отримувача</dt><dd id="storeTransferCard"></dd></div><div><dt>Сума передоплати</dt><dd id="storeTransferAmount"></dd></div><div><dt>Номер замовлення</dt><dd id="storeTransferReference"></dd></div></dl>
+      <p class="store-help">Переказ зробіть у своєму банківському застосунку. Якщо є поле призначення платежу, зазначте номер замовлення. Після переказу повідомте продавцю цей номер. Він підтвердить оплату лише після перевірки надходження у своєму банку. Не переказуйте повторно, якщо вже сплатили.</p>
+    </section>
+    <p class="store-help">Замовлення створено, але переказ не здійснювався через сайт і надходження коштів не перевірено.</p>
     <button class="primary" type="button" id="storeContinue">Продовжити покупки</button>
   </section>
 </div></aside></div><div class="toast" id="toast"><span class="toast-check">✓</span><div class="toast-copy"><strong id="toastTitle">Додано до кошика</strong><span id="toastDetail"></span></div><button type="button" id="toastCart">Перейти до кошика <span>→</span></button><button class="toast-close" id="toastClose" type="button" aria-label="Закрити">×</button></div></body></html>
