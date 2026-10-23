@@ -51,8 +51,8 @@ before(async()=>{
   const options=mfOptions={name:'loza',modules:true,script:await worker.text(),compatibilityDate:'2026-10-22',d1Databases:['DB'],bindings:env,
     serviceBindings:{ASSETS:async request=>{
       const path=new URL(request.url).pathname;
-      if(!['/','/index.html','/admin.js','/admin.css','/storefront.js','/storefront.css','/content-rules.js','/site-effects.js','/site-enhancements.css','/vendor/gsap.min.js'].includes(path))return new Response('Not found',{status:404});
-      const file=path==='/'?'index.html':path.slice(1);return new Response(await readFile(new URL(file,root)),{headers:{'Content-Type':file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':'text/html'}});
+      if(!['/','/index.html','/admin.js','/admin.css','/storefront.js','/storefront.css','/content-rules.js','/site-effects.js','/site-enhancements.css','/vendor/gsap.min.js','/catalog-vines.svg'].includes(path))return new Response('Not found',{status:404});
+      const file=path==='/'?'index.html':path.slice(1);return new Response(await readFile(new URL(file,root)),{headers:{'Content-Type':file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':file.endsWith('.svg')?'image/svg+xml':'text/html'}});
     }},outboundService:async request=>{
       const url=new URL(request.url);
       if(url.href===issuer+'/cdn-cgi/access/certs')return Response.json({keys:[jwk]});
@@ -698,4 +698,18 @@ test('enhanced storefront: contacts, prefix, support form, GSAP and reduced moti
   }
   const page=await browser.newPage({reducedMotion:'reduce'});await page.goto((await mf.ready).origin+'/');await page.waitForFunction(()=>window.gsap);assert.equal(await page.evaluate(()=>gsap.getTweensOf('.grape-cluster').length),0);assert.equal(await page.locator('.welcome-line').isVisible(),true);await page.close();
   }finally{await browser.close();}
+});
+
+test('catalog portal navigates, cleans up, supports Escape and respects reduced motion',{skip:!process.env.LOZA_PLAYWRIGHT_MODULE,timeout:30000},async()=>{
+ const {chromium}=await import(pathToFileURL(process.env.LOZA_PLAYWRIGHT_MODULE).href),browser=await chromium.launch({channel:'msedge',headless:true});
+ try{for(const width of [390,1440]){
+  const page=await browser.newPage({viewport:{width,height:900},reducedMotion:'no-preference'}),errors=[];page.on('pageerror',e=>errors.push(e.message));await page.goto((await mf.ready).origin+'/');await page.waitForFunction(()=>window.gsap);
+  await page.locator('.hero-cta').dispatchEvent('click');await page.locator('.catalog-portal').waitFor();
+  await page.waitForTimeout(420);await page.screenshot({path:new URL('.wrangler/portal-'+width+'.png',root).pathname.slice(process.platform==='win32'?1:0)});
+  await page.locator('.catalog-portal').waitFor({state:'detached'});assert.ok(page.url().endsWith('#catalog'));assert.ok(await page.evaluate(()=>scrollY>0));assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  await page.screenshot({path:new URL('.wrangler/catalog-background-'+width+'.png',root).pathname.slice(process.platform==='win32'?1:0)});
+  await page.evaluate(()=>scrollTo({top:0,behavior:'instant'}));await page.locator('.hero-cta').dispatchEvent('click');await page.locator('.catalog-portal').waitFor();await page.keyboard.press('Escape');await page.locator('.catalog-portal').waitFor({state:'detached'});assert.deepEqual(errors,[]);await page.close();
+ }
+ const page=await browser.newPage({reducedMotion:'reduce'});await page.goto((await mf.ready).origin+'/');await page.locator('.hero-cta').click();assert.equal(await page.locator('.catalog-portal').count(),0);assert.ok(page.url().endsWith('#catalog'));await page.close();
+ }finally{await browser.close();}
 });
