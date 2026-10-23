@@ -1,3 +1,4 @@
+import {validBuyerName,blockedComment,nationalPhone} from './content-rules.js';
 (() => {
   "use strict";
   const $ = selector => document.querySelector(selector);
@@ -126,6 +127,11 @@
     $("#varietySuggestions").innerHTML = query ? products.filter(product => product.name.toLocaleLowerCase("uk").startsWith(query)).slice(0, 10).map(product => `<option value="${esc(product.name)}"></option>`).join("") : "";
   }
 
+  const buyer=$("#storeBuyer"),commentField=$("#storeComment");
+  buyer.addEventListener('input',()=>buyer.setCustomValidity(!buyer.value || validBuyerName(buyer.value)?'':'Вкажіть ім’я та прізвище українськими або російськими літерами.'));
+  commentField.addEventListener('input',()=>commentField.setCustomValidity(blockedComment(commentField.value)?'Приберіть нецензурні слова та відвертий контент.':''));
+  for(const field of [$("#storePhone"),$("#supportPhone")]){field.addEventListener('input',()=>{field.value=nationalPhone(field.value);});field.addEventListener('paste',event=>{if(!event.clipboardData)return;event.preventDefault();field.value=nationalPhone(event.clipboardData.getData('text'));});}
+
   const paymentRadio = () => document.querySelector('input[name="paymentMode"]:checked');
   const expectedAdvanceKop = () => {
     const mode = paymentRadio()?.value;
@@ -141,7 +147,7 @@
     return Boolean(file && file.size >= 32 && file.size <= 600000 && ["image/jpeg", "image/png", "application/pdf"].includes(file.type));
   };
   const proofReady = () => Boolean(quoted?.manualTransferCard && expectedAdvanceKop() !== null &&
-    parseAmountKop($("#storeReportedAmount").value) === expectedAdvanceKop() && proofFileValid());
+    proofFileValid());
   const readFileAsBase64 = file => new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
@@ -168,22 +174,17 @@
         : "Оберіть умови оплати, щоб побачити розрахунок.";
     const transferReady = Boolean(quoted?.manualTransferCard && method && expectedAdvanceKop() !== null);
     $("#storePaymentProof").hidden = !transferReady;
-    $("#storeReportedAmount").disabled = !transferReady;
+
     $("#storeProofFile").disabled = !transferReady;
     $("#storeCheckoutCard").textContent = transferReady ? quoted.manualTransferCard.replace(/(.{4})/g, "$1 ").trim() : "";
     $("#storeProofExpected").textContent = transferReady ? price(expectedAdvanceKop()) : "—";
     if (!quoted?.manualTransferCard && quoted && !quoteLoading) {
       $("#storePaymentInfo").textContent = "Реквізити для переказу недоступні. Замовлення зараз не оформлюється.";
     }
-    const entered = parseAmountKop($("#storeReportedAmount").value);
-    $("#storeProofStatus").textContent = !$("#storeReportedAmount").value.trim()
-      ? "Вкажіть суму з квитанції та виберіть файл."
-      : entered !== expectedAdvanceKop() ? `Сума не збігається. Для цього способу потрібно рівно ${price(expectedAdvanceKop())}.`
-      : !proofFileValid() ? "Сума збігається. Прикріпіть JPG, PNG або PDF до 600 КБ."
-      : "Сума збігається з кошиком, файл додано. Продавець перевірить чек і зарахування.";
+    $("#storeProofStatus").textContent=proofFileValid()?'Квитанцію додано. Власник перевірить суму та зарахування коштів.':'Додайте квитанцію або скрін JPG, PNG чи PDF до 600 КБ. Сума передоплати вказана вище.';
   }
   document.querySelectorAll('input[name="paymentMode"]').forEach(input => input.addEventListener("change", () => { renderPaymentBreakdown(); updateControls(); }));
-  for (const selector of ["#storeReportedAmount", "#storeProofFile"]) {
+  for (const selector of ["#storeProofFile"]) {
     $(selector).addEventListener(selector === "#storeProofFile" ? "change" : "input", updateControls);
   }
   $("#storeCopyCard").addEventListener("click", async () => {
@@ -206,7 +207,7 @@
     $("#storeFields").disabled = inFlight || Boolean(pendingPayload);
     renderPaymentBreakdown();
     $("#storeSubmit").disabled = inFlight || recovering || !config?.checkoutAvailable || !token || (!pendingPayload && (!quoted || quoteLoading || !paymentRadio() || !proofReady()));
-    $("#storeSubmit").textContent = inFlight ? "Надсилаємо квитанцію…" : pending ? "Повторити надсилання" : "Підтвердити замовлення з квитанцією";
+    $("#storeSubmit").textContent = inFlight ? "Надсилаємо квитанцію…" : pending ? "Повторити надсилання" : "Надіслати на перевірку оплати";
     $("#storeTotal").textContent = quoted ? price(quoted.amountKop) : quoteLoading ? "Розраховуємо…" : "—";
     $("#storeRefreshQuote").hidden = !cart.length || receiptShown || Boolean(quoted) || quoteLoading || Boolean(pending);
     $("#storeForm").setAttribute("aria-busy", String(inFlight));
@@ -299,6 +300,38 @@
       });
     } catch (error) { feedback(error.message, "error"); }
   }
+
+  // A separate private support queue, never an order or payment mutation.
+  const supportDialog=$("#supportDialog"),supportForm=$("#supportForm"),supportStatus=$("#supportStatus");
+  let supportWidget=null,supportToken='',supportBusy=false,supportPending=null;
+  const supportType=()=>document.querySelector('input[name="supportContactType"]:checked').value;
+  function supportControls(){
+    $("#supportSubmit").disabled=supportBusy || !config?.supportAvailable || !supportToken;
+    $("#supportFields").disabled=supportBusy || Boolean(supportPending);
+    $("#supportSubmit").textContent=supportBusy?'Надсилаємо…':supportPending?'Повторити надсилання':'Надіслати звернення';
+  }
+  function supportContact(){const phone=supportType()==='phone';$("#supportPhoneLabel").hidden=!phone;$("#supportPhone").disabled=!phone;$("#supportPhone").required=phone;$("#supportTelegramLabel").hidden=phone;$("#supportTelegram").disabled=phone;$("#supportTelegram").required=!phone;}
+  document.querySelectorAll('input[name="supportContactType"]').forEach(el=>el.addEventListener('change',supportContact));
+  $("#supportReason").addEventListener('change',()=>{$("#supportComment").required=$("#supportReason").value==='other';$("#supportComment").minLength=$("#supportReason").value==='other'?5:0;});
+  $("#supportComment").addEventListener('input',()=>$("#supportComment").setCustomValidity(blockedComment($("#supportComment").value)?'Приберіть нецензурні слова та відвертий контент.':''));
+  document.querySelectorAll('[data-support-open]').forEach(button=>button.addEventListener('click',async()=>{
+    supportDialog.showModal();supportControls();
+    if(!config?.supportAvailable){supportStatus.textContent='Форма ще недоступна. Напишіть у Telegram або зателефонуйте за контактами нижче.';return;}
+    if(supportWidget!==null)return;
+    try{const turnstile=await loadTurnstile();if(!supportDialog.open)return;supportWidget=turnstile.render('#supportTurnstile',{sitekey:config.turnstileSiteKey,action:'loza_support',theme:'light',size:'flexible',language:'uk',callback:value=>{supportToken=value;supportControls();},'expired-callback':()=>{supportToken='';supportControls();},'error-callback':()=>{supportToken='';supportStatus.textContent='Не вдалося пройти перевірку. Спробуйте ще раз або напишіть у Telegram.';supportControls();}});}catch(error){supportStatus.textContent=error.message;}
+  }));
+  $("#supportClose").addEventListener('click',()=>supportDialog.close());
+  supportDialog.addEventListener('click',event=>{if(event.target===supportDialog){const box=supportDialog.getBoundingClientRect();if(event.clientX<box.left || event.clientX>box.right || event.clientY<box.top || event.clientY>box.bottom)supportDialog.close();}});
+  supportForm.addEventListener('submit',async event=>{
+    event.preventDefault();if(supportBusy || !supportForm.reportValidity() || !supportToken)return;
+    const type=supportType(),contact=type==='phone'?'+380'+$("#supportPhone").value.trim():$("#supportTelegram").value.trim();
+    if(type==='telegram' && !/^@?[A-Za-z][A-Za-z0-9_]{4,31}$/.test(contact)){supportStatus.textContent='Вкажіть Telegram у форматі @username.';return;}
+    supportPending ||= {key:makeKey(),payload:{reason:$("#supportReason").value,comment:$("#supportComment").value.trim(),contactType:type,contact}};
+    supportBusy=true;supportStatus.textContent='Надсилаємо звернення…';supportControls();
+    try{const result=await api('/api/support',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':supportPending.key},body:JSON.stringify({...supportPending.payload,turnstileToken:supportToken}),signal:timeoutSignal(20000)});supportPending=null;supportForm.reset();supportContact();supportStatus.textContent='Звернення '+result.requestId+' прийнято. Сергій зможе відповісти за вашим контактом.';}
+    catch(error){if(['INVALID_SUPPORT','CONTENT_NOT_ALLOWED','IDEMPOTENCY_CONFLICT'].includes(error.code))supportPending=null;supportStatus.textContent=error.message+(supportPending?' Повторне надсилання використає той самий ключ.':'');}
+    finally{supportBusy=false;supportToken='';if(supportWidget!==null)window.turnstile?.reset(supportWidget);supportControls();}
+  });
 
   function resetTurnstile() {
     token = "";
@@ -504,18 +537,18 @@
     }
     if (!token) { feedback("Пройдіть перевірку перед надсиланням.", "error"); return; }
     if (!pending && (!quoted || quoteLoading || !cart.length)) { feedback("Дочекайтеся розрахунку кошика.", "error"); return; }
-    if (!pendingPayload && !proofReady()) { feedback("Додайте квитанцію та вкажіть точну суму передоплати.", "error"); return; }
+    if (!pendingPayload && !proofReady()) { feedback("Додайте квитанцію або скрін переказу.", "error"); return; }
     inFlight = true; feedback("Надсилаємо квитанцію й створюємо замовлення…"); updateControls();
     try {
       const file = $("#storeProofFile").files[0];
       const input = pendingPayload || {
         items: pending ? pending.items : cart.map(item => ({ ...item })),
-        customer: { name: $("#storeBuyer").value.trim(), phone: $("#storePhone").value.trim() },
+        customer: { name: $("#storeBuyer").value.trim(), phone: "+380"+$("#storePhone").value.trim() },
         delivery: { city: $("#storeCity").value.trim(), method: $("#storeDelivery").value, branch: $("#storeBranch").value.trim() },
         comment: $("#storeComment").value.trim(),
         payment: {
           mode: paymentRadio()?.value || "",
-          reportedAmountKop: parseAmountKop($("#storeReportedAmount").value),
+          reportedAmountKop: expectedAdvanceKop(),
           proof: { mimeType: file?.type, dataBase64: await readFileAsBase64(file) },
         },
       };
@@ -528,7 +561,7 @@
       if (error.code === "IDEMPOTENCY_CONFLICT") {
         pendingPayload = null;
         feedback("Попередній запит уже прийнято. Натисніть «Перевірити попередній запит».", "error");
-      } else if (["INVALID_DETAILS", "INVALID_ITEMS", "INVALID_BODY", "INVALID_FORMAT", "INVALID_KEY", "INVALID_PAYMENT_PROOF", "BODY_TOO_LARGE", "STOCK_UNAVAILABLE", "FORBIDDEN"].includes(error.code)) {
+      } else if (["CONTENT_NOT_ALLOWED", "INVALID_DETAILS", "INVALID_ITEMS", "INVALID_BODY", "INVALID_FORMAT", "INVALID_KEY", "INVALID_PAYMENT_PROOF", "BODY_TOO_LARGE", "STOCK_UNAVAILABLE", "FORBIDDEN"].includes(error.code)) {
         pending = null; pendingPayload = null; savePending();
         feedback(error.message, "error");
         if (error.code === "STOCK_UNAVAILABLE") { await loadCatalog(false); scheduleQuote(); }

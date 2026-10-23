@@ -8,12 +8,12 @@ import {pathToFileURL} from 'node:url';
 import {webcrypto} from 'node:crypto';
 const {Miniflare,convertV4MiniflareOptions}=await import(pathToFileURL(process.env.LOZA_MINIFLARE_MODULE || './node_modules/miniflare/dist/src/index.js').href);
 const root=new URL('../',import.meta.url),origin='https://preview.loza.test';
-let mf,db,keys,jwk,csrf,token;
+let mf,db,keys,jwk,csrf,token,mfOptions;
 let telegramMode='ok',sent=[],calls=0;
 const audience='a'.repeat(64),admin='owner@example.test';
 const issuer='https://loza-test.cloudflareaccess.com';
 // Match the actual Preview configuration shape: bare hostname, signed HTTPS issuer.
-const env={ACCESS_TEAM_DOMAIN:'loza-test.cloudflareaccess.com',ACCESS_AUD:audience,ADMIN_EMAILS:admin,ADMIN_CSRF_SECRET:'fixture-csrf-secret-'.repeat(4),CHECKOUT_SECURITY_KEY:'fixture-checkout-secret-'.repeat(4),TURNSTILE_SITE_KEY:'fixture-site-key',TURNSTILE_SECRET_KEY:'fixture-turnstile-secret',TELEGRAM_BOT_TOKEN:'12345:fixture_token',TELEGRAM_CHAT_ID:'123456'};
+const env={ACCESS_TEAM_DOMAIN:'loza-test.cloudflareaccess.com',ACCESS_AUD:audience,ADMIN_EMAILS:admin,ADMIN_CSRF_SECRET:'fixture-csrf-secret-'.repeat(4),CHECKOUT_SECURITY_KEY:'fixture-checkout-secret-'.repeat(4),TURNSTILE_SITE_KEY:'fixture-site-key',TURNSTILE_SECRET_KEY:'fixture-turnstile-secret',TELEGRAM_BOT_TOKEN:'12345:fixture_token',TELEGRAM_CHAT_ID:'123456',MANUAL_TRANSFER_ENABLED:'true',MANUAL_TRANSFER_CARD:'4111111111111111'};
 const b64=v=>Buffer.from(typeof v==='string'?v:JSON.stringify(v)).toString('base64url');
 async function jwt(changes={},header={}) {
   const now=Math.floor(Date.now()/1000),h=b64({alg:'RS256',kid:'test-key',...header});
@@ -22,6 +22,11 @@ async function jwt(changes={},header={}) {
   return h+'.'+payload+'.'+Buffer.from(signature).toString('base64url');
 }
 async function request(path,{auth=token,data,key,csrfToken=csrf,headers={}}={}) {
+  if(path==='/api/orders/create' && data?.payment){
+    const proof=data.paymentProof;let amount=10000;
+    if(data.payment.mode==='full' && Array.isArray(data.items)){amount=0;for(const item of data.items){const product=await db.prepare('SELECT price_kop FROM products WHERE id=?').bind(item.productId || '').first();amount+=(product?.price_kop||0)*(item.quantity||0);}}
+    data={...data,payment:{...data.payment,reportedAmountKop:proof?.amountKop??amount,proof:proof?{mimeType:proof.type,dataBase64:proof.base64}:{mimeType:'application/pdf',dataBase64:Buffer.from('%PDF-1.7\n'+'isolated fixture '.repeat(3)).toString('base64')}}};delete data.paymentProof;
+  }
   const response=await mf.dispatchFetch(origin+path,{method:data===undefined?'GET':'POST',headers:{...(auth?{'Cf-Access-Jwt-Assertion':auth}:{}),...(data===undefined?{}:{Origin:origin,'Content-Type':'application/json','X-CSRF-Token':csrfToken || '','Idempotency-Key':key || crypto.randomUUID()}),...headers},body:data===undefined?undefined:JSON.stringify(data)});
   return response;
 }
@@ -31,7 +36,7 @@ async function apply(file){
   for(const line of source.split(/\r?\n/)){
     if(!line.trim() || line.trim().startsWith('--'))continue;
     chunk+=line+'\n';if(/^CREATE TRIGGER/i.test(chunk.trim()))trigger=true;
-    if((trigger && line.trim()==='END;') || (!trigger && /;\s*$/.test(line))){await db.prepare(chunk).run();chunk='';trigger=false;}
+    if((trigger && (line.trim()==='END;' || /^BEGIN\b.*END;\s*$/.test(line.trim()))) || (!trigger && /;\s*$/.test(line))){await db.prepare(chunk).run();chunk='';trigger=false;}
   }
   assert.equal(chunk.trim(),'');
 }
@@ -43,15 +48,15 @@ before(async()=>{
   const boundary=bundle.toString().split('\r\n')[0].slice(2);
   const form=await new Response(bundle,{headers:{'Content-Type':'multipart/form-data; boundary='+boundary}}).formData();
   const worker=[...form.values()].find(x=>typeof x!=='string');assert.ok(worker);
-  const options={name:'loza',modules:true,script:await worker.text(),compatibilityDate:'2026-10-22',d1Databases:['DB'],bindings:env,
+  const options=mfOptions={name:'loza',modules:true,script:await worker.text(),compatibilityDate:'2026-10-22',d1Databases:['DB'],bindings:env,
     serviceBindings:{ASSETS:async request=>{
       const path=new URL(request.url).pathname;
-      if(!['/','/index.html','/admin.js','/admin.css','/storefront.js','/storefront.css'].includes(path))return new Response('Not found',{status:404});
+      if(!['/','/index.html','/admin.js','/admin.css','/storefront.js','/storefront.css','/content-rules.js','/site-effects.js','/site-enhancements.css','/vendor/gsap.min.js'].includes(path))return new Response('Not found',{status:404});
       const file=path==='/'?'index.html':path.slice(1);return new Response(await readFile(new URL(file,root)),{headers:{'Content-Type':file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':'text/html'}});
     }},outboundService:async request=>{
       const url=new URL(request.url);
       if(url.href===issuer+'/cdn-cgi/access/certs')return Response.json({keys:[jwk]});
-      if(url.hostname==='challenges.cloudflare.com')return Response.json({success:true,action:'loza_checkout',hostname:new URL(origin).hostname});
+      if(url.hostname==='challenges.cloudflare.com')return Response.json({success:true,action:(await request.clone().json()).response==='support-fixture'?'loza_support':'loza_checkout',hostname:new URL(origin).hostname});
       if(url.hostname==='api.telegram.org'){
         calls++;const payload=await request.json();sent.push(payload);
         if(telegramMode==='429')return Response.json({ok:false,error_code:429,parameters:{retry_after:1}},{status:429});
@@ -80,6 +85,7 @@ before(async()=>{
   await apply('migrations/0005_manual_availability.sql');await apply('migrations/0005_manual_availability.sql');
   await apply('migrations/0009_payment_tracking.sql');await apply('migrations/0009_payment_tracking.sql');
   await apply('migrations/0010_payment_audit_guards.sql');await apply('migrations/0010_payment_audit_guards.sql');
+  await apply('migrations/0011_payment_proofs.sql');
   token=await jwt();const session=await json('/api/admin/session');assert.equal(session.status,200);csrf=session.data.csrfToken;
 });
 after(async()=>{if(mf)await mf.dispose();});
@@ -174,7 +180,7 @@ test('migration is repeatable and preserves legacy orders and bank events',async
   assert.ok(search.data.products.some(p=>p.name==='Аватар'));
 });
 let orderId;
-const checkout={items:[{productId:'loza-002',quantity:2}],customer:{name:'Preview Buyer',phone:'+380991234567'},delivery:{city:'Preview City',method:'nova_poshta',branch:'Private delivery 55'},comment:'Private comment',payment:{mode:'deposit_cod'},turnstileToken:'isolated-fixture'};
+const checkout={items:[{productId:'loza-002',quantity:2}],customer:{name:'Іван Петренко',phone:'+380991234567'},delivery:{city:'Preview City',method:'nova_poshta',branch:'Private delivery 55'},comment:'Private comment',payment:{mode:'deposit_cod'},turnstileToken:'isolated-fixture'};
 test('payment options use trusted integer kopecks and reject invalid deposit amounts',()=>{
   assert.deepEqual(paymentBreakdown(15000,'deposit_cod'),{mode:'deposit_cod',advanceKop:10000,codKop:5000});
   assert.deepEqual(paymentBreakdown(15000,'full'),{mode:'full',advanceKop:15000,codKop:0});
@@ -204,7 +210,7 @@ test('order commit queues one message; concurrent replay never creates duplicate
   assert.ok(storedTime.created_at);
   assert.ok(text.includes('Дата й час: '+formatKyivTimestamp(storedTime.created_at)+' (Київ)'));
   assert.match(text,/× 2/);assert.match(text,/300.00 грн/);assert.match(text,/Передоплата 100 грн|передоплата 100 грн/);assert.match(text,/Оплата: не перевірена/);
-  for(const pii of ['Preview Buyer','380991234567','Preview City','Private delivery','Private comment'])assert.ok(!text.includes(pii));
+  for(const pii of ['Іван Петренко','380991234567','Preview City','Private delivery','Private comment'])assert.ok(!text.includes(pii));
   assert.equal(sent.filter(x=>x.text.includes(orderId)).length,1);
 });
 test('payment ledger: new order starts unpaid; admin alone can report, manually verify and audit the advance independently',async()=>{
@@ -562,6 +568,7 @@ test('payment confirmation dialog cancellation has no effect; explicit acceptanc
     await page.getByRole('dialog').getByText(expectedKyiv+' (Київ)',{exact:true}).waitFor({state:'visible'});
     page.setDefaultTimeout(8000);
     const select=page.getByLabel('Статус оплати',{exact:true});await select.selectOption('confirmed');
+    await page.getByLabel('Сума, яку ви бачите у квитанції, грн',{exact:true}).fill('100,00');await page.getByRole('checkbox',{name:'Квитанцію перевірено:',exact:false}).check();
     page.once('dialog',d=>d.dismiss());await page.getByRole('button',{name:'Зберегти статус оплати'}).click();
     assert.equal((await db.prepare('SELECT state FROM loza_payment_states WHERE order_id=?').bind(id).first()).state,'awaiting');
     page.once('dialog',d=>d.accept());await page.getByRole('button',{name:'Зберегти статус оплати'}).click();await page.getByRole('dialog').waitFor({state:'hidden'});
@@ -595,5 +602,100 @@ test('Kyiv order table and details agree in summer and winter from a Los Angeles
       await row.getByRole('button',{name:'Деталі'}).click();await page.getByRole('dialog').getByText(expected+' (Київ)',{exact:true}).waitFor();
       assert.deepEqual(errors,[]);assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.close();
     }
+  }finally{await browser.close();}
+});
+
+test('receipt checkout: exact amounts, private attachment, retries and owner-only confirmation',async()=>{
+  await apply('migrations/0013_payment_confirmation_guards.sql');await apply('migrations/0013_payment_confirmation_guards.sql');
+  await apply('migrations/0012_support_requests.sql');
+  const options={...mfOptions,bindings:{...env,PAYMENT_RECEIPTS_REQUIRED:'true',SUPPORT_ENABLED:'true'}};
+  await mf.setOptions(convertV4MiniflareOptions?convertV4MiniflareOptions(options):options);db=await mf.getD1Database('DB');
+  const config=(await json('/api/store/config',{auth:null})).data;assert.equal(config.supportAvailable,true);
+  const product=await adminProduct('loza-004');await json('/api/admin/products/loza-004',{data:editPayload(product,{available:true,priceConfirmed:true})});
+  const items=[{productId:'loza-004',quantity:2}],quoted=(await json('/api/cart/quote',{data:{items}})).data.amountKop;
+  const base64=Buffer.from('%PDF-1.7\n% isolated receipt fixture').toString('base64');
+  const input={...checkout,items,paymentProof:{amountKop:10000,type:'application/pdf',base64}};
+  const before=(await db.prepare('SELECT COUNT(*) n FROM orders').first()).n;
+  for(const amount of [9999,10001,10000.5,-100,0]){
+    const result=await json('/api/orders/create',{data:{...input,paymentProof:{...input.paymentProof,amountKop:amount}}});assert.equal(result.status,400);assert.equal(result.data.code,'INVALID_PAYMENT_PROOF');
+  }
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM orders').first()).n,before);
+  assert.equal((await json('/api/orders/create',{data:{...input,paymentProof:{...input.paymentProof,base64:Buffer.from('<script>bad</script>').toString('base64')}}})).data.code,'INVALID_PAYMENT_PROOF');
+  await db.prepare('DELETE FROM checkout_rate_limits').run();
+  const key=crypto.randomUUID(),created=await json('/api/orders/create',{data:input,key});assert.equal(created.status,201);const id=created.data.orderId;
+  assert.equal(created.data.paymentVerified,false);assert.equal(created.data.amountKop,quoted);
+  assert.equal((await json('/api/orders/create',{data:input,key})).data.orderId,id);
+  assert.equal((await json('/api/orders/create',{data:{...input,paymentProof:{...input.paymentProof,base64:Buffer.from('%PDF-1.7 changed').toString('base64')}},key})).status,409);
+  assert.equal((await request('/api/admin/orders/'+id+'/proof',{auth:null})).status,403);
+  const file=await request('/api/admin/orders/'+id+'/proof');assert.equal(file.status,200);assert.match(file.headers.get('Content-Disposition'),/attachment/);assert.equal(Buffer.from(await file.arrayBuffer()).toString('base64'),base64);
+  const details=(await json('/api/admin/orders/'+id)).data;assert.ok(details.paymentProof);assert.equal(JSON.stringify(details).includes(base64),false);
+  assert.equal((await json('/api/admin/orders/'+id+'/status',{data:{version:details.order.version,status:'confirmed'}})).data.code,'PAYMENT_REVIEW_REQUIRED');
+  await assert.rejects(db.prepare("UPDATE orders SET status='confirmed' WHERE id=?").bind(id).run(),/LOZA_RECEIPT_PAYMENT_UNVERIFIED/);
+  const command={version:0,state:'confirmed',confirmedAfterBankCheck:true};
+  assert.equal((await json('/api/admin/orders/'+id+'/payment',{data:command})).data.code,'PAYMENT_REVIEW_REQUIRED');
+  assert.equal((await json('/api/admin/orders/'+id+'/payment',{data:{...command,receiptReviewed:true,observedAmountKop:10001}})).status,400);
+  assert.equal((await json('/api/admin/orders/'+id+'/payment',{data:{...command,receiptReviewed:true,observedAmountKop:10000}})).status,200);
+  assert.equal((await json('/api/admin/orders/'+id+'/status',{data:{version:details.order.version,status:'confirmed'}})).status,200);
+  assert.equal((await db.prepare('SELECT amount_kop FROM orders WHERE id=?').bind(id).first()).amount_kop,quoted);
+  await assert.rejects(db.prepare('DELETE FROM order_payment_proofs WHERE order_id=?').bind(id).run(),/LOZA_PROOF_IMMUTABLE/);
+  const full=await json('/api/orders/create',{data:{...input,payment:{mode:'full'},paymentProof:{...input.paymentProof,amountKop:quoted}}});assert.equal(full.status,201);assert.equal(full.data.payment.codKop,0);
+  assert.equal((await db.prepare("SELECT COUNT(*) n FROM orders WHERE id='LEGACY-1'").first()).n,1);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM products').first()).n,110);
+});
+
+
+test('receipt UI copies the card and accepts a screenshot on mobile and desktop',{skip:!process.env.LOZA_PLAYWRIGHT_MODULE,timeout:30000},async()=>{
+  const {chromium}=await import(pathToFileURL(process.env.LOZA_PLAYWRIGHT_MODULE).href),browser=await chromium.launch({channel:'msedge',headless:true});
+  try{for(const width of [390,1440]){
+    const page=await browser.newPage({viewport:{width,height:900}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
+    await page.addInitScript(()=>{localStorage.setItem('loza-cart-v2',JSON.stringify([{productId:'loza-004',quantity:2}]));Object.defineProperty(navigator,'clipboard',{value:{writeText:async value=>{window.copiedCard=value}}});});
+    await page.route('https://challenges.cloudflare.com/**',route=>route.fulfill({status:200,body:''}));
+    await page.goto((await mf.ready).origin+'/');await page.locator('#openCart').click();await page.locator('input[name="paymentMode"][value="deposit_cod"]').check();await page.locator('#storeCopyCard').waitFor();
+    await page.locator('#storeCopyCard').click();assert.equal(await page.evaluate(()=>window.copiedCard),'4111111111111111');
+    await page.locator('#storeProofFile').setInputFiles({name:'receipt.png',mimeType:'image/png',buffer:Buffer.from([137,80,78,71,13,10,26,10,...new Array(40).fill(0)])});
+    assert.equal(await page.locator('#storeProofFile').evaluate(el=>el.files.length),1);
+    await page.locator('input[name="paymentMode"][value="deposit_cod"]').check();assert.equal(await page.locator('#storeReportedAmount').count(),0);
+    await page.waitForFunction(()=>document.querySelector('#storeAdvance').textContent.includes('100,00'));
+    await page.locator('#storeBuyer').fill('John Smith');assert.equal(await page.locator('#storeBuyer').evaluate(el=>el.validity.valid),false);await page.locator('#storeBuyer').fill('Іван Петренко');assert.equal(await page.locator('#storeBuyer').evaluate(el=>el.validity.valid),true);await page.locator('#storePhone').fill('986270347');assert.equal(await page.locator('#storePhone').inputValue(),'986270347');assert.match(await page.locator('#storePhone').locator('..').innerText(),/\+380/);assert.deepEqual(errors,[]);
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.close();
+  }}finally{await browser.close();}
+});
+
+test('support is private, moderated, rate limited and does not mutate orders',async()=>{
+  const orders=(await db.prepare('SELECT COUNT(*) n FROM orders').first()).n,amounts=(await db.prepare('SELECT SUM(amount_kop) n FROM orders').first()).n;
+  for(const data of [{reason:'unknown'},{reason:'site',comment:'fuck',contactType:'phone',contact:'+380986270347'},{reason:'other',comment:'ні',contactType:'phone',contact:'+380986270347'},{reason:'site',comment:'Дякую',contactType:'telegram',contact:'https://invalid.example'}])assert.equal((await json('/api/support',{auth:null,data})).status,400);
+  await db.prepare('DELETE FROM checkout_rate_limits').run();
+  const data={reason:'site',comment:'Не працює кнопка пошуку',contactType:'telegram',contact:'fixture_user',turnstileToken:'support-fixture'},key=crypto.randomUUID();
+  const created=await json('/api/support',{auth:null,data,key});assert.equal(created.status,201);assert.equal(JSON.stringify(created.data).includes('fixture_user'),false);
+  assert.equal((await json('/api/support',{auth:null,data,key})).data.requestId,created.data.requestId);
+  assert.equal((await json('/api/support',{auth:null,data:{...data,comment:'Інший коментар'},key})).status,409);
+  assert.equal((await request('/api/admin/support',{auth:null})).status,403);
+  const list=(await json('/api/admin/support')).data;assert.equal(list.requests[0].id,created.data.requestId);assert.equal(list.requests[0].contact,'@fixture_user');
+  assert.equal((await json('/api/support',{auth:null,data,headers:{Origin:'https://evil.example'}})).status,403);
+  await json('/api/support',{auth:null,data});assert.equal((await json('/api/support',{auth:null,data})).status,429);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM orders').first()).n,orders);assert.equal((await db.prepare('SELECT SUM(amount_kop) n FROM orders').first()).n,amounts);
+  await db.prepare('DELETE FROM checkout_rate_limits').run();
+  const badName=await json('/api/orders/create',{data:{...checkout,customer:{...checkout.customer,name:'John Smith'}}});assert.equal(badName.status,400);
+  const badComment=await json('/api/orders/create',{data:{...checkout,comment:'порно'}});assert.equal(badComment.data.code,'CONTENT_NOT_ALLOWED');
+});
+
+test('enhanced storefront: contacts, prefix, support form, GSAP and reduced motion',{skip:!process.env.LOZA_PLAYWRIGHT_MODULE,timeout:45000},async()=>{
+  const {chromium}=await import(pathToFileURL(process.env.LOZA_PLAYWRIGHT_MODULE).href),browser=await chromium.launch({channel:'msedge',headless:true});
+  try{for(const width of [390,1440]){
+    const page=await browser.newPage({viewport:{width,height:920}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
+    await page.addInitScript(()=>{window.turnstile={render:(target,opts)=>{setTimeout(()=>opts.callback('support-fixture'),0);return opts.action},reset:()=>{}};});
+    await page.route('**/api/support',async route=>{const r=await request('/api/support',{auth:null,data:route.request().postDataJSON(),key:route.request().headers()['idempotency-key']});await route.fulfill({status:r.status,headers:Object.fromEntries(r.headers),body:await r.text()});});
+    await page.goto((await mf.ready).origin+'/');await page.waitForFunction(()=>window.gsap && document.querySelectorAll('.catalog-card').length>0);await page.waitForTimeout(1200);
+    assert.equal(await page.locator('[data-support-open]').count(),2);assert.ok(await page.locator('header a[href="tel:+380986270347"]').count());assert.ok(await page.locator('footer a[href="https://t.me/serhiidln"]').count());
+    const boxes=await page.locator('.grape-cluster').evaluateAll(nodes=>nodes.map(n=>{const b=n.getBoundingClientRect();return {x:b.x,right:b.right}}));assert.ok(boxes[0].right<boxes[1].x && boxes[1].right<boxes[2].x);
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+    await page.screenshot({path:new URL('.wrangler/loza-enhanced-'+width+'.png',root).pathname.slice(process.platform==='win32'?1:0)});
+    await page.locator('[data-support-open]').first().click();await page.locator('#supportDialog[open]').waitFor();
+    await page.locator('#supportReason').selectOption('other');await page.locator('#supportComment').fill('Прошу допомогти з вибором сорту');await page.locator('input[name="supportContactType"][value="telegram"]').check();await page.locator('#supportTelegram').fill('fixture_user');
+    await page.screenshot({path:new URL('.wrangler/loza-support-'+width+'.png',root).pathname.slice(process.platform==='win32'?1:0)});
+    await page.locator('#supportSubmit').click();await page.waitForFunction(()=>document.querySelector('#supportStatus').textContent.includes('прийнято'));
+    await page.locator('#supportClose').click();assert.deepEqual(errors,[]);await page.close();
+  }
+  const page=await browser.newPage({reducedMotion:'reduce'});await page.goto((await mf.ready).origin+'/');await page.waitForFunction(()=>window.gsap);assert.equal(await page.evaluate(()=>gsap.getTweensOf('.grape-cluster').length),0);assert.equal(await page.locator('.welcome-line').isVisible(),true);await page.close();
   }finally{await browser.close();}
 });

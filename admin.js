@@ -107,21 +107,17 @@
       const {order:o,items,payment,paymentReady,paymentTerms,paymentProof}=await api('orders/'+encodeURIComponent(id));openEditor('Замовлення');
       const dl=el('dl',undefined,'detail');for(const [label,value]of [['Номер',o.id],['Дата й час (Київ)',date(o.created_at)],['Сума',money(o.amount_kop)],['Покупець',o.buyer_name],['Телефон',o.phone],['Доставка',[o.city,o.delivery_method==='nova_poshta'?'Нова пошта':o.delivery_method==='ukrposhta'?'Укрпошта':'',o.delivery_branch].filter(Boolean).join(' · ')],['Умови оплати',paymentTerms?.mode ? 'Передоплата '+money(paymentTerms.advanceKop)+', післяплата '+money(paymentTerms.codKop) : 'Не обрано або некоректні умови оплати'],['Статус оплати',paymentReady?(payment?paymentLabels[payment.state] || payment.state:'Немає умов оплати'):'Облік оплати ще не налаштовано'],['Коментар',(o.comment||'').replace(/^\[LOZA_PAYMENT:(?:full|deposit_cod)\] /,'') || '—']])dl.append(el('dt',label),el('dd',value || '—'));
       $('editorBody').append(dl,table(['Товар','Кількість','Сума'],items.map(i=>[i.product_name,i.quantity,money(i.line_total_kop)])));
+      if(paymentProof){
+        const link=el('a','Завантажити квитанцію / скрін');link.href='/api/admin/orders/'+encodeURIComponent(id)+'/proof';
+        $('editorBody').append(el('p','Квитанція покупця: заявлена сума '+money(paymentProof.reported_amount_kop)+'. Перевірте видиму суму, отримувача та зарахування на рахунок. Сам файл не доводить оплату.','hint'),link);
+      }
       const form=el('form'),label=el('label','Статус замовлення'),select=el('select');
-      const next={pending:['confirmed','cancelled'],confirmed:['shipped','cancelled'],shipped:['completed']}[o.status] || [];
+      const next=({pending:['confirmed','cancelled'],confirmed:['shipped','cancelled'],shipped:['completed']}[o.status] || []).filter(status=>status!=='confirmed' || !paymentProof || payment?.state==='confirmed');
       [o.status,...next].forEach(status=>{const option=el('option',labels[status] || status);option.value=status;select.append(option);});label.append(select);form.append(label);form.className='actions';
       if(next.length){const submit=el('button','Змінити статус','primary');submit.type='submit';form.append(submit);form.addEventListener('submit',e=>{e.preventDefault();saving(async()=>{if(select.value===o.status)return;if(select.value==='cancelled' && !confirm('Скасувати замовлення? Наявність сортів не зміниться.'))return;await api('orders/'+encodeURIComponent(id)+'/status',{version:o.version,status:select.value});dialog.close();await load();});});}
       $('editorBody').append(form);
       const payPanel=el('section',undefined,'payment-check');
       payPanel.append(el('h3','Контроль надходження оплати'));
-      if(paymentProof) {
-        payPanel.append(el('p','Покупець вказав суму переказу: '+money(paymentProof.reported_amount_kop)+' · завантажено: '+date(paymentProof.created_at),'hint'));
-        const proofLink=el('a','Завантажити квитанцію покупця');
-        proofLink.href='/api/admin/orders/'+encodeURIComponent(id)+'/proof';
-        proofLink.className='button';
-        payPanel.append(proofLink);
-        payPanel.append(el('p','Квитанція і сума, введена покупцем, не підтверджують зарахування. Звірте файл і фактичний рух коштів у банку, перш ніж змінити статус оплати.','hint'));
-      } else payPanel.append(el('p','Квитанції немає (старе замовлення).','hint'));
       if(!paymentReady) {
         payPanel.append(el('p','Міграція 0009_payment_tracking ще не застосована до D1 цього середовища. Замовлення залишаються доступними, але статус оплати поки не змінюється.','hint'));
       }else if(!payment || !paymentTerms?.mode) {
@@ -139,13 +135,27 @@
         const confirmHint=el('p','«Покупець повідомив» не означає, що кошти отримано. Вибирайте «Надходження підтверджено вручну» лише після перевірки рахунку. Це стосується тільки передоплати; післяплата окремо.','hint');
         const paySubmit=el('button','Зберегти статус оплати','primary');paySubmit.type='submit';
         payForm.append(payLabel,paySubmit);
+        let observedAmount,reviewed;
+        if(paymentProof){
+          observedAmount=el('input');observedAmount.type='text';observedAmount.inputMode='decimal';
+          const amountLabel=el('label','Сума, яку ви бачите у квитанції, грн');amountLabel.append(observedAmount);
+          reviewed=el('input');reviewed.type='checkbox';const reviewLabel=el('label',undefined,'check');reviewLabel.append(reviewed,document.createTextNode('Квитанцію перевірено: сума й отримувач збігаються; зарахування перевірено на рахунку'));
+          payForm.insertBefore(amountLabel,paySubmit);payForm.insertBefore(reviewLabel,paySubmit);
+        }
         payForm.addEventListener('submit',e=>{
           e.preventDefault();
           if(paySelect.value===payment.state)return;
           const confirmedAfterBankCheck=paySelect.value==='confirmed';
+          let observedAmountKop;
+          if(confirmedAfterBankCheck && paymentProof){
+            const value=observedAmount.value.trim().replace(',','.');
+            if(!/^\d{1,8}(?:\.\d{1,2})?$/.test(value) || !reviewed.checked){notice('Перевірте квитанцію, введіть її точну суму й підтвердьте зарахування.',true);return;}
+            const [whole,fraction='']=value.split('.');observedAmountKop=Number(whole)*100+Number(fraction.padEnd(2,'0'));
+            if(observedAmountKop!==paymentProof.reported_amount_kop){notice('Сума у квитанції не збігається з необхідною передоплатою.',true);return;}
+          }
           if(confirmedAfterBankCheck && !confirm('Ви особисто перевірили зарахування '+money(paymentTerms.advanceKop)+' на свій рахунок? Дані покупця та сам вибір способу оплати НЕ є підтвердженням.'))return;
           saving(async()=>{
-            await api('orders/'+encodeURIComponent(id)+'/payment',{version:payment.version,state:paySelect.value,confirmedAfterBankCheck});
+            await api('orders/'+encodeURIComponent(id)+'/payment',{version:payment.version,state:paySelect.value,confirmedAfterBankCheck,...(paymentProof?{receiptReviewed:reviewed.checked,observedAmountKop}:{})});
             dialog.close();await load();
             return 'Статус оплати оновлено. Це ручна відмітка, а не банківська перевірка сайтом.';
           });
@@ -154,6 +164,13 @@
       }
       $('editorBody').append(payPanel);
     }catch(error){notice(error.message,true);}
+  }
+  async function support(){
+    const data=await api('support?offset='+offset);
+    const nodes=[el('p',data.supportReady?'Звернення покупців. Контакти доступні лише адміністратору.':'Застосуйте міграцію 0012, щоб увімкнути приватну чергу підтримки.','hint')];
+    nodes.push(table(['Дата (Київ)','Причина','Коментар','Контакт','Номер'],data.requests.map(r=>[date(r.created_at),r.reasonLabel,r.comment||'—',r.contact,r.id])));
+    if(offset>0)nodes.push(button('Назад',()=>{offset=Math.max(0,offset-50);load();}));
+    if(data.hasMore)nodes.push(button('Далі',()=>{offset+=50;load();}));return nodes;
   }
   async function dashboard() {
     const data=await api('dashboard'),stats=el('div',undefined,'stats'),counts=Object.fromEntries(data.orders.map(r=>[r.status,r.count]));
@@ -220,9 +237,9 @@
   }
   async function load() {
     const id=++loadId;content.setAttribute('aria-busy','true');
-    try{const nodes=await ({dashboard,products,orders,audit,telegram}[view])();if(id===loadId)content.replaceChildren(...nodes);}catch(error){notice(error.message,true);}finally{if(id===loadId)content.setAttribute('aria-busy','false');}
+    try{const nodes=await ({dashboard,products,orders,audit,telegram,support}[view])();if(id===loadId)content.replaceChildren(...nodes);}catch(error){notice(error.message,true);}finally{if(id===loadId)content.setAttribute('aria-busy','false');}
   }
-  document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>{view=b.dataset.view;offset=0;$('notice').hidden=true;document.querySelectorAll('[data-view]').forEach(x=>x.removeAttribute('aria-current'));b.setAttribute('aria-current','page');$('pageTitle').textContent={dashboard:'Огляд магазину',products:'Товари та наявність',orders:'Замовлення',audit:'Історія змін',telegram:'Telegram-сповіщення'}[view];load();}));
+  document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>{view=b.dataset.view;offset=0;$('notice').hidden=true;document.querySelectorAll('[data-view]').forEach(x=>x.removeAttribute('aria-current'));b.setAttribute('aria-current','page');$('pageTitle').textContent={dashboard:'Огляд магазину',products:'Товари та наявність',orders:'Замовлення',audit:'Історія змін',telegram:'Telegram-сповіщення',support:'Звернення до підтримки'}[view];load();}));
   $('closeEditor').addEventListener('click',()=>{if(!busy)dialog.close();});dialog.addEventListener('cancel',e=>{if(busy)e.preventDefault();});
   api('session').then(data=>{csrf=data.csrfToken;$('identity').textContent=data.email;return load();}).catch(error=>{content.replaceChildren(el('p','Доступ закрито до налаштування Cloudflare Access.'));content.setAttribute('aria-busy','false');notice(error.message,true);});
 })();
