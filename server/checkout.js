@@ -1,7 +1,7 @@
 import {validBuyerName,blockedComment} from '../content-rules.js';
 const encoder = new TextEncoder();
 export const MAX_QUANTITY = 5;
-export const MAX_PROOF_BYTES = 600000;
+export const MAX_PROOF_BYTES = 1500000;
 export const DELIVERY_METHODS = [
   { id: "nova_poshta", name: "Нова пошта" },
 ];
@@ -154,16 +154,17 @@ export function normalizePaymentProof(input, expectedAmountKop) {
   if (!file || typeof file !== "object" || Array.isArray(file) ||
       !["image/jpeg", "image/png", "application/pdf"].includes(file.mimeType) ||
       typeof file.dataBase64 !== "string" || file.dataBase64.length > Math.ceil(MAX_PROOF_BYTES * 4 / 3) + 4 ||
-      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(file.dataBase64)) {
-    throw new StoreError("INVALID_PAYMENT_PROOF", "Додайте чек у форматі JPG, PNG або PDF (до 600 КБ).");
+      (file.dataBase64.length % 4 !== 0 || /[^A-Za-z0-9+/]/.test(file.dataBase64.replace(/={1,2}$/, "")))) {
+    throw new StoreError("INVALID_PAYMENT_PROOF", "Додайте чек у форматі JPG, PNG або PDF (до 1,5 МБ).");
   }
   let decoded;
   try { decoded = atob(file.dataBase64); }
   catch { throw new StoreError("INVALID_PAYMENT_PROOF", "Не вдалося прочитати квитанцію."); }
   if (decoded.length < 32 || decoded.length > MAX_PROOF_BYTES) {
-    throw new StoreError("INVALID_PAYMENT_PROOF", "Розмір квитанції має бути до 600 КБ.");
+    throw new StoreError("INVALID_PAYMENT_PROOF", "Розмір квитанції має бути до 1,5 МБ.");
   }
-  const bytes = Uint8Array.from(decoded, char => char.charCodeAt(0));
+  const bytes = new Uint8Array(decoded.length);
+  for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i);
   const isPng = bytes.length > 8 && [137,80,78,71,13,10,26,10].every((v,i) => bytes[i] === v);
   const isJpeg = bytes.length > 3 && bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
   const isPdf = bytes.length > 5 && [37,80,68,70,45].every((v,i) => bytes[i] === v);

@@ -1,3 +1,4 @@
+import {receiptAiEnabled,receiptAiReady} from '../../../server/receipt-analysis.js';
 import {supportReady} from '../../../server/support.js';
 import { configured, DELIVERY_METHODS, endpoint, json,db } from "../../../server/checkout.js";
 
@@ -8,4 +9,7 @@ export const onRequest = context => endpoint(context, "GET", async context => {c
   deliveryMethods: DELIVERY_METHODS,
   paymentsEnabled: false,
   supportAvailable:available,
+  receiptAiRequired:receiptAiEnabled(env),
+  receiptAiAvailable:receiptAiReady(env),
+  maxProofBytes:1500000,
 });});
