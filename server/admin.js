@@ -118,6 +118,19 @@ export async function adminApi(context) {
         WHERE (?='' OR o.status=?) AND instr(o.id,?)>0 ORDER BY c.created_at DESC,o.rowid DESC LIMIT 51 OFFSET ?`).bind(status,status,q,offset).all();
       return json({success:true,orders:rows.results.slice(0,50).map(r=>({...r,items:JSON.parse(r.items)})),hasMore:rows.results.length>50,paymentReady:ready});
     }
+    const proofRoute=route.match(/^orders\/([A-Za-z0-9-]{1,100})\/proof$/);
+    if(method==='GET' && proofRoute) {
+      const proof=await database.prepare('SELECT mime_type,file_content FROM order_payment_proofs WHERE order_id=?').bind(proofRoute[1]).first();
+      if(!proof) throw new StoreError('NOT_FOUND','Квитанцію не знайдено.',404);
+      const extension={'image/jpeg':'jpg','image/png':'png','application/pdf':'pdf'}[proof.mime_type];
+      const bytes=Array.isArray(proof.file_content)?Uint8Array.from(proof.file_content):
+        proof.file_content instanceof ArrayBuffer?new Uint8Array(proof.file_content):null;
+      if(!extension || !bytes || bytes.byteLength<32 || bytes.byteLength>600000) throw invalid();
+      return new Response(bytes,{status:200,headers:{
+        'Content-Type':proof.mime_type,'Content-Disposition':`attachment; filename="${proofRoute[1]}-receipt.${extension}"`,
+        'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer'
+      }});
+    }
     const paymentRoute=route.match(/^orders\/([A-Za-z0-9-]{1,100})\/payment$/);
     if(paymentRoute && method==='POST') {
       if(!await paymentReady(database))throw new StoreError('PAYMENT_MIGRATION_REQUIRED','Налаштуйте міграцію 0009_payment_tracking у D1 Preview.',503);
@@ -161,7 +174,8 @@ export async function adminApi(context) {
       const ready=await paymentReady(database);
       const payment=ready?await database.prepare('SELECT state,version,updated_by,updated_at FROM loza_payment_states WHERE order_id=?').bind(match[1]).first():null;
       const terms=paymentFromStored(order.comment,order.amount_kop);
-      return json({success:true,order,items:items.results,payment,paymentReady:ready,paymentTerms:terms});
+      const proof=await database.prepare('SELECT reported_amount_kop,mime_type,file_sha256,created_at FROM order_payment_proofs WHERE order_id=?').bind(match[1]).first();
+      return json({success:true,order,items:items.results,payment,paymentReady:ready,paymentTerms:terms,paymentProof:proof||null});
     }
     if(match && method==='POST' && match[2]) {
       const input=await body(context.request); if(!int(input.version) || !Object.hasOwn(STATUS_LABELS,input.status)) throw invalid();
