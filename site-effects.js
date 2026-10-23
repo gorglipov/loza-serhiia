@@ -5,8 +5,8 @@
   const seen=new WeakSet();let observer,grapeObserver,visibilityHandler;
   const media=gsap.matchMedia();
   media.add('(prefers-reduced-motion: no-preference)',()=>{
-    const intro=gsap.timeline({defaults:{ease:'power2.out',duration:.65}});
-    intro.from('.welcome-line',{y:12,autoAlpha:0}).from('.hero-main h1, .hero-main p, .hero-cta',{y:18,autoAlpha:0,stagger:.1},'-.3');
+    const intro=gsap.timeline();
+    // The separate arrival scene provides the visible welcome.
     const grapes=gsap.to('.grape-cluster',{y:-7,rotation:i=>i===1?3:-3,duration:2.3,stagger:.25,repeat:-1,yoyo:true,ease:'sine.inOut'});
     let inView=true;const update=()=>{if(document.hidden||!inView)grapes.pause();else grapes.resume();};
     grapeObserver=new IntersectionObserver(entries=>{inView=entries[0].isIntersecting;update();});const group=document.querySelector('.hero-grapes');if(group)grapeObserver.observe(group);
@@ -20,32 +20,54 @@
   const progress=()=>{scheduled=false;const height=document.documentElement.scrollHeight-innerHeight;bar.style.transform='scaleX('+(height>0?Math.min(1,scrollY/height):0)+')';};
   addEventListener('scroll',()=>{if(!scheduled){scheduled=true;requestAnimationFrame(progress);}},{passive:true});addEventListener('resize',progress);progress();
 })();
-// Circular portal is decorative and never captures input or blocks navigation.
+// Motion uses the browser animation API and wall-clock holds, independent of GSAP.
+// Each visit/reload gets a readable welcome, including a direct #catalog visit.
 (() => {
   const link=document.querySelector('.hero-cta[href="#catalog"]'),target=document.querySelector('#catalog');
   if(!link||!target)return;
-  let busy=false,finishCurrent;
+  const reduced=matchMedia('(prefers-reduced-motion: reduce)');
+  let closeScene=null,arrivalDone=false;
+  const leaf='<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M24 43V17m0 12C8 29 5 15 9 7c15 0 20 10 15 22Zm0 7c17-1 22-13 17-24-14 0-21 10-17 24Z"/></svg>';
   const go=()=>{target.scrollIntoView({behavior:'instant',block:'start'});if(location.hash!=='#catalog')history.pushState(null,'','#catalog');};
+  function scene(kind,origin){
+    closeScene?.();
+    const portal=kind==='portal',layer=document.createElement('section');
+    layer.className='loza-scene '+(portal?'catalog-portal':'arrival-scene');
+    layer.setAttribute('aria-label',portal?'Перехід до каталогу':'Вітаємо у LOZA');
+    layer.innerHTML='<div class="scene-iris"><div class="scene-orbit"></div><div class="scene-orbit scene-orbit-inner"></div></div><div class="scene-copy"><span class="scene-brand">LOZA · ВІД СЕРГІЯ</span>'+leaf+'<h2>'+(portal?'Ваш сад<br>починається тут':'Вітаємо у нашому<br><em>каталозі лози</em>')+'</h2><p>'+(portal?'Відкриваємо каталог сортів':'Виноградна лоза, вирощена з турботою')+'</p><span class="scene-rule"></span></div><button class="scene-skip" type="button">'+(portal?'До каталогу':'Пропустити вступ')+' <span aria-hidden="true">↗</span></button>';
+    document.body.append(layer);
+    const iris=layer.querySelector('.scene-iris'),copy=layer.querySelector('.scene-copy'),animations=[],timers=[];
+    let done=false;
+    const later=(fn,ms)=>timers.push(setTimeout(fn,ms));
+    const animate=(node,frames,options)=>{if(node.animate&&(!reduced.matches||frames.every(frame=>!('transform' in frame)&&!('clipPath' in frame))))animations.push(node.animate(frames,{fill:'both',...options}));};
+    const finish=()=>{if(done)return;done=true;timers.forEach(clearTimeout);animations.forEach(a=>a.cancel());layer.remove();document.removeEventListener('keydown',escape);if(closeScene===finish)closeScene=null;if(portal){go();const h=target.querySelector('h2');h?.setAttribute('tabindex','-1');h?.focus({preventScroll:true});}};
+    const escape=e=>{if(e.key==='Escape')finish();};closeScene=finish;
+    document.addEventListener('keydown',escape);layer.querySelector('button').addEventListener('click',finish);
+    // The opaque background remains visible during the hold, rather than a flash.
+    if(portal&&origin&&!reduced.matches){
+      const x=origin.left+origin.width/2,y=origin.top+origin.height/2;
+      animate(iris,[{clipPath:`circle(0px at ${x}px ${y}px)`},{clipPath:`circle(${Math.ceil(Math.hypot(innerWidth,innerHeight))}px at ${x}px ${y}px)`}],{duration:800,easing:'cubic-bezier(.22,.7,.2,1)'});
+    }else animate(layer,[{opacity:0},{opacity:1}],{duration:500});
+    animate(copy,[{opacity:0,transform:'translateY(28px) scale(.96)'},{opacity:1,transform:'translateY(0) scale(1)'}],{duration:850,delay:portal?350:150,easing:'cubic-bezier(.16,1,.3,1)'});
+    layer.querySelectorAll('.scene-orbit').forEach((node,i)=>animate(node,[{transform:`translate(-50%,-50%) rotate(${i?18:-12}deg) scale(.86)`},{transform:`translate(-50%,-50%) rotate(${i?-12:18}deg) scale(1.08)`}],{duration:3400,easing:'ease-out'}));
+    const hold=portal?1900:2400;
+    later(()=>{if(portal)go();animate(layer,[{opacity:1},{opacity:0}],{duration:650,easing:'ease-in-out'});later(finish,650);},hold);
+    later(finish,4200); // Cleanup still works if animation completion is unavailable.
+    return finish;
+  }
+  function arrival(){
+    if(arrivalDone||document.hidden)return;arrivalDone=true;
+    requestAnimationFrame(()=>requestAnimationFrame(()=>scene('arrival')));
+  }
+  if(document.readyState==='complete')arrival();else addEventListener('load',arrival,{once:true});
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden)arrival();});
   link.addEventListener('click',event=>{
-    if(event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||matchMedia('(prefers-reduced-motion: reduce)').matches||!window.gsap)return;
-    event.preventDefault();if(busy)return;busy=true;
-    const box=link.getBoundingClientRect(),x=box.left+box.width/2,y=box.top+box.height/2;
-    const overlay=document.createElement('div');overlay.className='catalog-portal';overlay.setAttribute('aria-hidden','true');
-    overlay.innerHTML='<div class="portal-disc"></div><div class="portal-caption"><svg viewBox="0 0 48 48" fill="none" stroke-width="1.5"><path d="M24 43V17m0 12C8 29 5 15 9 7c15 0 20 10 15 22Zm0 7c17-1 22-13 17-24-14 0-21 10-17 24Z"/></svg><strong>Ваш сад починається тут</strong><span>ВІДКРИВАЄМО КАТАЛОГ ЛОЗИ</span></div>';
-    document.body.append(overlay);const disc=overlay.querySelector('.portal-disc'),caption=overlay.querySelector('.portal-caption');
-    const cover=Math.hypot(Math.max(x,innerWidth-x),Math.max(y,innerHeight-y))/90+1;
-    let navigated=false,done=false,timer;
-    const navigate=()=>{if(!navigated){navigated=true;go();}};
-    const cleanup=()=>{if(done)return;done=true;clearTimeout(timer);timeline?.kill();overlay.remove();busy=false;finishCurrent=null;document.removeEventListener('keydown',escape);};
-    const escape=event=>{if(event.key==='Escape'){navigate();cleanup();}};
-    let timeline;finishCurrent=()=>{navigate();cleanup();};document.addEventListener('keydown',escape);
-    try{
-      gsap.set(disc,{left:x-90,top:y-90,scale:.12,opacity:0});gsap.set(caption,{autoAlpha:0,y:12});
-      timeline=gsap.timeline({onComplete:()=>{navigate();cleanup();target.classList.remove('portal-active');target.parentElement.classList.add('portal-active');setTimeout(()=>target.parentElement.classList.remove('portal-active'),750);const heading=target.querySelector('h2');heading?.setAttribute('tabindex','-1');heading?.focus({preventScroll:true});}});
-      timeline.to(disc,{scale:cover,opacity:1,duration:.55,ease:'power3.inOut'}).to(caption,{autoAlpha:1,y:0,duration:.24},.22).call(navigate,[],.57).to(caption,{autoAlpha:0,y:-8,duration:.22},.75).to(disc,{opacity:0,scale:cover*1.1,duration:.44,ease:'power2.in'},.78);
-      timer=setTimeout(()=>{navigate();cleanup();},1800);
-    }catch{navigate();cleanup();}
+    if(event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey)return;
+    event.preventDefault();arrivalDone=true;
+    // Reduced motion keeps a readable opacity-only scene, without zoom or travel.
+    if(document.querySelector('.catalog-portal'))return;
+    scene('portal',link.getBoundingClientRect());
   });
-  matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change',event=>{if(event.matches)finishCurrent?.();});
-  addEventListener('pagehide',()=>finishCurrent?.());
+  reduced.addEventListener('change',()=>closeScene?.());
+  addEventListener('pagehide',()=>closeScene?.());
 })();
