@@ -290,6 +290,16 @@
       : payment.mode === "full"
         ? "Обрано: повна передоплата " + price(payment.advanceKop) + ". Оплата ще не підтверджена."
         : "Умови оплати уточнюються з продавцем.";
+    const transfer = data.manualTransfer;
+    const transferValid = transfer &&
+      typeof transfer.card === "string" && /^\d{16,19}$/.test(transfer.card) &&
+      Number.isSafeInteger(transfer.amountKop) && transfer.amountKop > 0 &&
+      transfer.amountKop === payment.advanceKop && transfer.reference === data.orderId &&
+      data.testOnly !== true;
+    $("#storeManualTransfer").hidden = !transferValid;
+    $("#storeTransferCard").textContent = transferValid ? transfer.card.replace(/(.{4})/g, "$1 ").trim() : "";
+    $("#storeTransferAmount").textContent = transferValid ? price(transfer.amountKop) : "";
+    $("#storeTransferReference").textContent = transferValid ? transfer.reference : "";
     const latest = readCart();
     // Remove purchased quantities only; other tabs may have added more items.
     cart = latest.length ? latest : cart;
