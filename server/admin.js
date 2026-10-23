@@ -2,6 +2,9 @@ import {body,db,endpoint,json,paymentFromStored,rateLimit,StoreError} from './ch
 import {issueCsrf} from './access.js';
 import {deliverPending,telegramConfigured,STATUS_LABELS} from './telegram.js';
 import {catalogApi} from './catalog.js';
+import {SUPPORT_REASONS,supportReady} from './support.js';
+const proofSchemaReady=async database=>Boolean(await database.prepare("SELECT version FROM loza_store_migrations WHERE version='0011_payment_proofs'").first());
+const confirmationGuardReady=async database=>Boolean(await database.prepare("SELECT version FROM loza_store_migrations WHERE version='0013_payment_confirmation_guards'").first());
 const invalid=()=>new StoreError('INVALID_ADMIN_INPUT','Перевірте введені значення.');
 const PAYMENT_STATES=['awaiting','reported','confirmed','not_paid'];
 const paymentReady=async database=>Boolean(await database.prepare("SELECT version FROM loza_store_migrations WHERE version='0009_payment_tracking'").first());
@@ -41,6 +44,7 @@ async function mutate(database,request,actor,kind,target,version,payload) {
     if(matches(saved)) return;
     if(String(error.message).includes('LOZA_VERSION_CONFLICT')) throw new StoreError('VERSION_CONFLICT','Дані змінилися. Оновіть сторінку перед редагуванням.',409);
     if(String(error.message).includes('LOZA_INVALID_TRANSITION')) throw new StoreError('INVALID_TRANSITION','Ця зміна статусу недоступна. Оновіть замовлення.',409);
+    if(String(error.message).includes('LOZA_RECEIPT_PAYMENT_UNVERIFIED'))throw new StoreError('PAYMENT_REVIEW_REQUIRED','Спочатку перевірте квитанцію, точну суму та зарахування коштів і підтвердьте оплату.',409);
     if(String(error.message).includes('LOZA_PRICE_NOT_CONFIRMED')) throw new StoreError('PRICE_NOT_CONFIRMED','Перевірте наявність і підтвердження ціни реального сорту.',400);
     throw error;
   }
@@ -76,6 +80,12 @@ export async function adminApi(context) {
     const actor=context.data.admin.email;
     if(route.startsWith('catalog/')) return catalogApi(context,database,route,actor,productInput,commandId);
     if(method==='GET' && route==='session') return json({success:true,email:actor,csrfToken:await issueCsrf(context.request,context.env,context.data.admin),statuses:STATUS_LABELS});
+    if(method==='GET' && route==='support'){
+      if(!await supportReady(database))return json({success:true,requests:[],supportReady:false});
+      const offset=Number(url.searchParams.get('offset') || 0);if(!int(offset,1000000))throw invalid();
+      const result=await database.prepare('SELECT id,reason,comment,contact_type,contact,created_at FROM loza_support_requests ORDER BY created_at DESC,rowid DESC LIMIT 51 OFFSET ?').bind(offset).all();
+      return json({success:true,requests:result.results.slice(0,50).map(r=>({...r,reasonLabel:SUPPORT_REASONS[r.reason]})),hasMore:result.results.length>50,supportReady:true});
+    }
     if(method==='GET' && route==='dashboard') {
       const [products,counts]=await Promise.all([
         database.prepare('SELECT COUNT(*) total,SUM(COALESCE(a.in_stock,0)) active FROM products p LEFT JOIN product_availability a ON a.product_id=p.id WHERE p.is_demo=0').first(),
@@ -140,6 +150,10 @@ export async function adminApi(context) {
         throw new StoreError('INVALID_PAYMENT_STATUS','Оберіть статус. Підтверджувати надходження можна лише після власної перевірки.',400);
       }
       const target=paymentRoute[1],id=commandId(context.request);
+      if(input.state==='confirmed' && await confirmationGuardReady(database)){
+        const proof=await database.prepare('SELECT reported_amount_kop FROM order_payment_proofs WHERE order_id=?').bind(target).first();
+        if(proof && (input.receiptReviewed!==true || input.observedAmountKop!==proof.reported_amount_kop))throw new StoreError('PAYMENT_REVIEW_REQUIRED','Перевірте квитанцію й введіть видиму суму переказу без банківської комісії.',400);
+      }
       const previous=()=>database.prepare('SELECT actor,order_id,expected_version,new_state FROM loza_payment_actions WHERE id=?').bind(id).first();
       const matches=record=>record?.actor===actor && record.order_id===target && record.expected_version===input.version && record.new_state===input.state;
       let saved=await previous();
@@ -174,8 +188,8 @@ export async function adminApi(context) {
       const ready=await paymentReady(database);
       const payment=ready?await database.prepare('SELECT state,version,updated_by,updated_at FROM loza_payment_states WHERE order_id=?').bind(match[1]).first():null;
       const terms=paymentFromStored(order.comment,order.amount_kop);
-      const proof=await database.prepare('SELECT reported_amount_kop,mime_type,file_sha256,created_at FROM order_payment_proofs WHERE order_id=?').bind(match[1]).first();
-      return json({success:true,order,items:items.results,payment,paymentReady:ready,paymentTerms:terms,paymentProof:proof||null});
+      const paymentProof=await proofSchemaReady(database)?await database.prepare('SELECT reported_amount_kop,mime_type,file_sha256,created_at FROM order_payment_proofs WHERE order_id=?').bind(match[1]).first():null;
+      return json({success:true,order,items:items.results,payment,paymentReady:ready,paymentTerms:terms,paymentProof});
     }
     if(match && method==='POST' && match[2]) {
       const input=await body(context.request); if(!int(input.version) || !Object.hasOwn(STATUS_LABELS,input.status)) throw invalid();

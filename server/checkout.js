@@ -1,3 +1,4 @@
+import {validBuyerName,blockedComment} from '../content-rules.js';
 const encoder = new TextEncoder();
 export const MAX_QUANTITY = 5;
 export const MAX_PROOF_BYTES = 600000;
@@ -105,6 +106,7 @@ function text(value, label, min, max) {
 export function normalizeOrder(input) {
   const items = normalizeItems(input.items);
   const name = text(input.customer?.name, "Ім’я", 2, 100);
+  if(!validBuyerName(name))throw new StoreError('INVALID_DETAILS','Вкажіть ім’я та прізвище українськими або російськими літерами.');
   let phone = text(input.customer?.phone, "Телефон", 9, 25).replace(/[\s()-]/g, "");
   if (/^0\d{9}$/.test(phone)) phone = "+38" + phone;
   if (/^380\d{9}$/.test(phone)) phone = "+" + phone;
@@ -115,6 +117,7 @@ export function normalizeOrder(input) {
   const branch = text(input.delivery?.branch, "Відділення доставки", 1, 180);
   const commentInput = input.comment ?? "";
   const comment = text(typeof commentInput === "string" ? commentInput.replace(/[\r\n\t]/g, " ") : commentInput, "Коментар", 0, 1000);
+  if(blockedComment(comment))throw new StoreError('CONTENT_NOT_ALLOWED','Приберіть нецензурні слова та відвертий контент із коментаря.');
   const paymentMode = input.payment?.mode;
   if (!["full", "deposit_cod"].includes(paymentMode)) {
     throw new StoreError("INVALID_PAYMENT", "Оберіть повну передоплату або передоплату 100 грн із післяплатою.");
@@ -205,7 +208,7 @@ export async function rateLimit(context, database, scope, limit) {
   if (row.hits > limit) throw new StoreError("RATE_LIMITED", "Забагато запитів. Зачекайте трохи та повторіть спробу.", 429, 60 - (now - window));
 }
 
-export async function verifyTurnstile(context, token) {
+export async function verifyTurnstile(context, token, expectedAction='loza_checkout') {
   if (!configured(context.env)) throw new StoreError("CHECKOUT_UNAVAILABLE", "Оформлення тимчасово недоступне. Спробуйте пізніше.", 503);
   if (typeof token !== "string" || !token || token.length > 2048) throw new StoreError("TURNSTILE_REQUIRED", "Пройдіть перевірку перед надсиланням.");
   let result;
@@ -219,7 +222,7 @@ export async function verifyTurnstile(context, token) {
     if (!response.ok) throw new Error("Verification unavailable");
     result = await response.json();
   } catch { throw new StoreError("TURNSTILE_UNAVAILABLE", "Перевірка тимчасово недоступна. Спробуйте ще раз.", 503); }
-  if (result.success !== true || result.action !== "loza_checkout" || result.hostname !== new URL(context.request.url).hostname) {
+  if (result.success !== true || result.action !== expectedAction || result.hostname !== new URL(context.request.url).hostname) {
     throw new StoreError("TURNSTILE_INVALID", "Повторіть перевірку та надішліть форму ще раз.");
   }
 }

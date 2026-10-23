@@ -60,6 +60,7 @@ export const onRequest = context => endpoint(context, "POST", async context => {
       scheduleNotifications(context,database);
       return receipt(saved, 200, context.env);
     }
+    if(String(error.message).includes('LOZA_PROOF_AMOUNT_CHANGED'))throw new StoreError('INVALID_PAYMENT_PROOF','Сума замовлення змінилася. Зв’яжіться з продавцем для звірки переказу.',409);
     if (String(error.message).includes("LOZA_STOCK_UNAVAILABLE")) throw new StoreError("STOCK_UNAVAILABLE", "Наявність або ціна змінилася. Оновіть кошик і повторіть спробу.", 409);
     throw error;
   }
