@@ -744,3 +744,35 @@ test('ribbon moves right with pause control and scroll entry works in both motio
   assert.deepEqual(errors,[]);await page.close();
  }}finally{await browser.close();}
 });
+
+test('0014 preserves old receipts, exact amount and immutable guards, and accepts a 1MB proof atomically',async()=>{
+ const snapshot=async()=>JSON.stringify((await db.prepare('SELECT order_id,reported_amount_kop,mime_type,file_sha256,hex(file_content) AS data,created_at FROM order_payment_proofs ORDER BY order_id').all()).results);
+ const before=await snapshot();await apply('migrations/0014_larger_payment_proofs.sql');assert.equal(await snapshot(),before);await apply('migrations/0014_larger_payment_proofs.sql');assert.equal(await snapshot(),before);
+ const items=[{productId:'loza-004',quantity:2}],bytes=Buffer.alloc(1000000);bytes.set([137,80,78,71,13,10,26,10]);const input={...checkout,items,paymentProof:{amountKop:10000,type:'image/png',base64:bytes.toString('base64')}};
+ const key=crypto.randomUUID(),created=await json('/api/orders/create',{data:input,key});assert.equal(created.status,201);const id=created.data.orderId;
+ assert.equal((await db.prepare('SELECT length(file_content) n FROM order_payment_proofs WHERE order_id=?').bind(id).first()).n,1000000);
+ assert.equal((await json('/api/orders/create',{data:input,key})).data.orderId,id);assert.equal(created.data.paymentVerified,false);
+ await assert.rejects(db.prepare('UPDATE order_payment_proofs SET reported_amount_kop=9999 WHERE order_id=?').bind(id).run(),/LOZA_PROOF_IMMUTABLE/);
+ await assert.rejects(db.prepare('DELETE FROM order_payment_proofs WHERE order_id=?').bind(id).run(),/LOZA_PROOF_IMMUTABLE/);
+ await assert.rejects(db.prepare("UPDATE orders SET status='confirmed' WHERE id=?").bind(id).run(),/LOZA_RECEIPT_PAYMENT_UNVERIFIED/);
+ assert.equal((await request('/api/admin/orders/'+id+'/proof',{auth:null})).status,403);
+});
+
+test('larger receipt input and prominent payment amount fit mobile and desktop',{skip:!process.env.LOZA_PLAYWRIGHT_MODULE,timeout:30000},async()=>{
+ const {chromium}=await import(pathToFileURL(process.env.LOZA_PLAYWRIGHT_MODULE).href),browser=await chromium.launch({channel:'msedge',headless:true});
+ try{for(const width of [320,390,1440]){
+  const page=await browser.newPage({viewport:{width,height:900},reducedMotion:'reduce'});await page.addInitScript(()=>localStorage.setItem('loza-cart-v2',JSON.stringify([{productId:'loza-004',quantity:2}])));await page.goto((await mf.ready).origin+'/');await page.locator('.arrival-scene').waitFor();await page.locator('.scene-skip').click();await page.locator('#openCart').click();await page.locator('input[name="paymentMode"][value="deposit_cod"]').check();await page.locator('#storeCheckoutCard').waitFor();await page.waitForFunction(()=>document.querySelector('#storeAdvance').textContent.includes('100,00'));
+  assert.match(await page.locator('label[for="storeProofFile"]').innerText(),/Квитанція або скрін оплати.*1,5 МБ/);assert.ok(await page.locator('#storeAdvance').evaluate(el=>parseFloat(getComputedStyle(el).fontSize)>=29));
+  const large=Buffer.alloc(1000000);large.set([137,80,78,71,13,10,26,10]);await page.locator('#storeProofFile').setInputFiles({name:'receipt.png',mimeType:'image/png',buffer:large});await page.waitForFunction(()=>document.querySelector('#storeProofStatus').textContent.includes('Квитанцію додано'));
+  await page.locator('.loza-payment-breakdown').scrollIntoViewIfNeeded();await page.screenshot({path:new URL('.wrangler/receipt-large-'+width+'.png',root).pathname.slice(process.platform==='win32'?1:0)});
+  await page.locator('input[name="paymentMode"][value="full"]').check();await page.waitForFunction(()=>document.querySelector('#storeAdvance').textContent===document.querySelector('#storePaymentTotal').textContent);assert.equal((await page.locator('#storeCod').innerText()).replace(/\s/g,' '),'0,00 грн');
+  assert.equal(await page.locator('.panel').evaluate(el=>el.scrollWidth<=el.clientWidth),true);await page.close();
+ }}finally{await browser.close();}
+});
+
+test('AI enabled without binding blocks creation before any order/payment/outbox writes',async()=>{
+ const before=await db.prepare('SELECT COUNT(*) n FROM orders').first();const options={...mfOptions,bindings:{...env,SUPPORT_ENABLED:'true',RECEIPT_AI_ENABLED:'true'}};await mf.setOptions(convertV4MiniflareOptions?convertV4MiniflareOptions(options):options);db=await mf.getD1Database('DB');
+ const config=(await json('/api/store/config',{auth:null})).data;assert.equal(config.receiptAiRequired,true);assert.equal(config.receiptAiAvailable,false);
+ const input={...checkout,items:[{productId:'loza-004',quantity:2}],paymentProof:{amountKop:10000,type:'application/pdf',base64:Buffer.from('%PDF-1.7\n% isolated receipt fixture').toString('base64')}};
+ const r=await json('/api/orders/create',{data:input});assert.equal(r.status,503);assert.equal(r.data.code,'RECEIPT_CHECK_UNAVAILABLE');assert.equal((await db.prepare('SELECT COUNT(*) n FROM orders').first()).n,before.n);
+});

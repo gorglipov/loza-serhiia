@@ -1,3 +1,4 @@
+import {inspectReceipt} from '../../../server/receipt-analysis.js';
 import { body, configured, db, digest, endpoint, findReceipt, manualTransferCard, normalizeOrder, normalizePaymentProof, paymentBreakdown, paymentMarker, quote, rateLimit, receipt, requestKey, requireSchema, StoreError, verifyTurnstile } from "../../../server/checkout.js";
 import { queueOrder, scheduleNotifications } from '../../../server/telegram.js';
 
@@ -10,7 +11,7 @@ export const onRequest = context => endpoint(context, "POST", async context => {
   if (!await database.prepare("SELECT version FROM loza_store_migrations WHERE version='0011_payment_proofs'").first()) {
     throw new StoreError("CHECKOUT_UNAVAILABLE", "Завантаження квитанцій ще не налаштовано.", 503);
   }
-  const input = await body(context.request, 850000);
+  const input = await body(context.request, 2100000);
   const order = normalizeOrder(input);
   const keyHash = await requestKey(context.request);
   // The same idempotency key must always be paired with exactly the same order and proof.
@@ -29,6 +30,7 @@ export const onRequest = context => endpoint(context, "POST", async context => {
   // Recompute the payable amounts from the trusted D1 quote, never from browser totals.
   const terms = paymentBreakdown(estimate.amountKop, order.payment.mode);
   const proof = normalizePaymentProof(input.payment, terms.advanceKop);
+  await inspectReceipt(context.env,proof,input.payment.proof.dataBase64,terms.advanceKop);
   const hashBytes = new Uint8Array(await crypto.subtle.digest('SHA-256', proof.bytes));
   const fileHash = Array.from(hashBytes, byte => byte.toString(16).padStart(2, '0')).join('');
   // Preserve the payment preference with the order; this is not proof of money received.

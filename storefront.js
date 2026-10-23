@@ -144,7 +144,7 @@ import {validBuyerName,blockedComment,nationalPhone} from './content-rules.js';
   };
   const proofFileValid = () => {
     const file = $("#storeProofFile").files[0];
-    return Boolean(file && file.size >= 32 && file.size <= 600000 && ["image/jpeg", "image/png", "application/pdf"].includes(file.type));
+    return Boolean(file && file.size >= 32 && file.size <= 1500000 && (config?.receiptAiRequired ? ["image/jpeg", "image/png"] : ["image/jpeg", "image/png", "application/pdf"]).includes(file.type));
   };
   const proofReady = () => Boolean(quoted?.manualTransferCard && expectedAdvanceKop() !== null &&
     proofFileValid());
@@ -172,16 +172,19 @@ import {validBuyerName,blockedComment,nationalPhone} from './content-rules.js';
         ? "100 грн — погоджена передоплата; решта — післяплата при отриманні. Доставка й комісії не включені."
         : method === "full" ? "До оформлення переказуйте точну суму вартості товарів на картку."
         : "Оберіть умови оплати, щоб побачити розрахунок.";
-    const transferReady = Boolean(quoted?.manualTransferCard && method && expectedAdvanceKop() !== null);
+    const transferReady = Boolean(quoted?.manualTransferCard && method && expectedAdvanceKop() !== null && (!config?.receiptAiRequired || config?.receiptAiAvailable));
     $("#storePaymentProof").hidden = !transferReady;
 
+    if(config?.receiptAiRequired&&!config?.receiptAiAvailable) $("#storePaymentInfo").textContent="Автоматична перевірка тимчасово недоступна. Зв’яжіться з продавцем перед переказом коштів.";
     $("#storeProofFile").disabled = !transferReady;
+    $("#storeReceiptAiNotice").hidden=!config?.receiptAiRequired;
+    $("#storeProofFile").accept=config?.receiptAiRequired?'image/jpeg,image/png':'image/jpeg,image/png,application/pdf';
     $("#storeCheckoutCard").textContent = transferReady ? quoted.manualTransferCard.replace(/(.{4})/g, "$1 ").trim() : "";
     $("#storeProofExpected").textContent = transferReady ? price(expectedAdvanceKop()) : "—";
     if (!quoted?.manualTransferCard && quoted && !quoteLoading) {
       $("#storePaymentInfo").textContent = "Реквізити для переказу недоступні. Замовлення зараз не оформлюється.";
     }
-    $("#storeProofStatus").textContent=proofFileValid()?'Квитанцію додано. Власник перевірить суму та зарахування коштів.':'Додайте квитанцію або скрін JPG, PNG чи PDF до 600 КБ. Сума передоплати вказана вище.';
+    $("#storeProofStatus").textContent=proofFileValid()?(config?.receiptAiRequired?'Файл буде перевірено автоматично перед прийняттям замовлення. Зарахування коштів підтверджує власник.':'Квитанцію додано. Власник перевірить суму та зарахування коштів.'):(config?.receiptAiRequired?'Додайте чіткий JPG або PNG до 1,5 МБ. PDF не проходить автоматичну перевірку.':'Додайте квитанцію або скрін JPG, PNG чи PDF до 1,5 МБ. Сума передоплати вказана вище.');
   }
   document.querySelectorAll('input[name="paymentMode"]').forEach(input => input.addEventListener("change", () => { renderPaymentBreakdown(); updateControls(); }));
   for (const selector of ["#storeProofFile"]) {
@@ -206,7 +209,7 @@ import {validBuyerName,blockedComment,nationalPhone} from './content-rules.js';
     $("#storeRecoverButton").disabled = recovering || inFlight;
     $("#storeFields").disabled = inFlight || Boolean(pendingPayload);
     renderPaymentBreakdown();
-    $("#storeSubmit").disabled = inFlight || recovering || !config?.checkoutAvailable || !token || (!pendingPayload && (!quoted || quoteLoading || !paymentRadio() || !proofReady()));
+    $("#storeSubmit").disabled = inFlight || recovering || !config?.checkoutAvailable || (config?.receiptAiRequired && !config?.receiptAiAvailable) || !token || (!pendingPayload && (!quoted || quoteLoading || !paymentRadio() || !proofReady()));
     $("#storeSubmit").textContent = inFlight ? "Надсилаємо квитанцію…" : pending ? "Повторити надсилання" : "Надіслати на перевірку оплати";
     $("#storeTotal").textContent = quoted ? price(quoted.amountKop) : quoteLoading ? "Розраховуємо…" : "—";
     $("#storeRefreshQuote").hidden = !cart.length || receiptShown || Boolean(quoted) || quoteLoading || Boolean(pending);

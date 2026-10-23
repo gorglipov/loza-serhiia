@@ -41,3 +41,8 @@ test('card shown before checkout still requires enabled, valid server secret', (
   assert.equal(manualTransferCard({ MANUAL_TRANSFER_ENABLED: 'false', MANUAL_TRANSFER_CARD: '4111111111111111' }), null);
   assert.equal(manualTransferCard({ MANUAL_TRANSFER_ENABLED: 'true', MANUAL_TRANSFER_CARD: '4111111111111112' }), null);
 });
+
+test('receipt size boundary accepts 1.5MB without regexp stack overflow',()=>{
+ const large=Buffer.alloc(MAX_PROOF_BYTES);large.set(bytes.subarray(0,8));assert.equal(normalizePaymentProof(payload(10000,'image/png',large),10000).bytes.length,MAX_PROOF_BYTES);
+ invalid(payload(10000,'image/png',Buffer.concat([large,Buffer.from([0])])));for(const dataBase64 of ['AAAA=AAA','AAAA===','A===','AA A'])invalid({reportedAmountKop:10000,proof:{mimeType:'image/png',dataBase64}});
+});
