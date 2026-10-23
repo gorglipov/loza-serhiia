@@ -70,4 +70,40 @@
   });
   reduced.addEventListener('change',()=>closeScene?.());
   addEventListener('pagehide',()=>closeScene?.());
+  const dismissArrival=()=>{if(document.querySelector('.arrival-scene'))closeScene?.();};
+  addEventListener('wheel',dismissArrival,{passive:true});addEventListener('touchmove',dismissArrival,{passive:true});
+  addEventListener('keydown',e=>{if(['PageDown','ArrowDown',' '].includes(e.key)&&!e.target.closest('input,textarea,select,button'))dismissArrival();});
+})();
+// A lightweight boundary reveal follows normal wheel/touch scrolling; it never hijacks it.
+(() => {
+ const catalog=document.querySelector('#catalog'),tools=document.querySelector('#catalogTools'),ribbon=document.querySelector('.vine-ribbon');
+ if(!catalog||!ribbon)return;
+ const reduced=matchMedia('(prefers-reduced-motion: reduce)'),track=ribbon.querySelector('.ribbon-track'),button=ribbon.querySelector('button'),count=document.querySelector('#catalogSize');
+ let ticker,manuallyPlaying=false,paused=false,inView=true;
+ const syncCount=()=>ribbon.querySelectorAll('[data-ribbon-count]').forEach(el=>el.textContent=count?.textContent?.trim()&&count.textContent.trim()!=='—'?count.textContent.trim()+' сортів':'Сорти винограду');
+ syncCount();if(count)new MutationObserver(syncCount).observe(count,{childList:true,characterData:true,subtree:true});
+ function updateTicker(){
+  const allowed=(!reduced.matches||manuallyPlaying)&&!paused;
+  if(allowed&&!ticker&&track.animate)ticker=track.animate([{transform:'translateX(-50%)'},{transform:'translateX(0)'}],{duration:42000,iterations:Infinity,easing:'linear'});
+  if(ticker){if(allowed&&inView&&!document.hidden)ticker.play();else ticker.pause();}
+  button.textContent=allowed?'Зупинити стрічку':'Запустити стрічку';button.setAttribute('aria-label',button.textContent);
+ }
+ button.addEventListener('click',()=>{if((!reduced.matches||manuallyPlaying)&&!paused){paused=true;}else{paused=false;manuallyPlaying=true;}updateTicker();});
+ ribbon.addEventListener('mouseenter',()=>ticker?.pause());ribbon.addEventListener('mouseleave',updateTicker);
+ ribbon.addEventListener('focusin',()=>ticker?.pause());ribbon.addEventListener('focusout',updateTicker);
+ new IntersectionObserver(entries=>{inView=entries[0].isIntersecting;updateTicker();}).observe(ribbon);
+ document.addEventListener('visibilitychange',updateTicker);reduced.addEventListener('change',()=>{manuallyPlaying=false;paused=false;updateTicker();});updateTicker();
+ let armed=true,scheduled=false,lastY=scrollY,active=[];
+ const cancel=()=>{active.forEach(a=>a.cancel());active=[];};
+ function check(){
+  scheduled=false;const y=scrollY,down=y>lastY+1;lastY=y;
+  const rect=catalog.getBoundingClientRect();if(y<12||rect.top>innerHeight*.92){armed=true;return;}
+  if(!armed||!down||y<12||rect.top>innerHeight*.86||tools?.getBoundingClientRect().bottom<0||document.querySelector('.loza-scene'))return;
+  armed=false;cancel();catalog.dataset.scrollReveal=String(Number(catalog.dataset.scrollReveal||0)+1);
+  const nodes=[catalog,tools,...document.querySelectorAll('.catalog-card')].filter(Boolean).filter(el=>{const b=el.getBoundingClientRect();return b.top<innerHeight+80&&b.bottom>0;}).slice(0,6);
+  nodes.forEach((node,i)=>{if(!node.animate)return;const frames=reduced.matches?[{opacity:.35},{opacity:1}]:[{opacity:.25,transform:'translateY(24px)'},{opacity:1,transform:'translateY(0)'}];active.push(node.animate(frames,{duration:1050,delay:i*85,easing:'cubic-bezier(.16,1,.3,1)'}));});
+  if(!reduced.matches&&ribbon.animate)active.push(ribbon.animate([{filter:'brightness(1)'},{filter:'brightness(1.12)'},{filter:'brightness(1)'}],{duration:1200}));
+ }
+ addEventListener('scroll',()=>{if(!scheduled){scheduled=true;requestAnimationFrame(check);}},{passive:true});
+ reduced.addEventListener('change',cancel);
 })();

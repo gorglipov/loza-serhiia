@@ -727,3 +727,20 @@ test('arrival remains readable, replays on reload and direct catalog entry witho
   assert.deepEqual(errors,[]);assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.close();
  }}finally{await browser.close();}
 });
+
+test('ribbon moves right with pause control and scroll entry works in both motion modes',{skip:!process.env.LOZA_PLAYWRIGHT_MODULE,timeout:45000},async()=>{
+ const {chromium}=await import(pathToFileURL(process.env.LOZA_PLAYWRIGHT_MODULE).href),browser=await chromium.launch({channel:'msedge',headless:true});
+ try{for(const [width,reducedMotion] of [[390,'no-preference'],[1440,'no-preference'],[960,'reduce']]){
+  const page=await browser.newPage({viewport:{width,height:900},reducedMotion}),errors=[];page.on('pageerror',e=>errors.push(e.message));
+  await page.goto((await mf.ready).origin+'/');await page.locator('.arrival-scene').waitFor();await page.locator('.scene-skip').click();await page.locator('.arrival-scene').waitFor({state:'detached'});
+  await page.waitForFunction(()=>document.querySelector('#catalogSize').textContent!=='—');assert.equal(await page.locator('[data-ribbon-count]').first().innerText(),(await page.locator('#catalogSize').innerText())+' сортів');
+  const y=await page.locator('.vine-ribbon').evaluate(el=>el.getBoundingClientRect().top);await page.mouse.wheel(0,Math.max(100,y-180));await page.waitForFunction(()=>Number(document.querySelector('#catalog').dataset.scrollReveal)>0);
+  await page.screenshot({path:new URL('.wrangler/ribbon-'+width+'.png',root).pathname.slice(process.platform==='win32'?1:0)});
+  assert.equal(await page.locator('.catalog-portal').count(),0);assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  await page.mouse.move(0,0);const track=page.locator('.ribbon-track'),position=()=>track.evaluate(el=>new DOMMatrixReadOnly(getComputedStyle(el).transform).m41);
+  if(reducedMotion==='reduce'){const a=await position();await page.waitForTimeout(400);assert.equal(await position(),a);await page.getByRole('button',{name:'Запустити стрічку',exact:true}).click();await page.locator('.ribbon-toggle').blur();await page.mouse.move(0,0);}
+  const a=await position();await page.waitForTimeout(500);assert.ok(await position()>a,'ribbon moves to the right');
+  await page.getByRole('button',{name:'Зупинити стрічку',exact:true}).click();const b=await position();await page.mouse.move(0,0);await page.locator('.ribbon-toggle').blur();await page.waitForTimeout(400);assert.equal(await position(),b);
+  assert.deepEqual(errors,[]);await page.close();
+ }}finally{await browser.close();}
+});
