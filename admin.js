@@ -104,7 +104,7 @@
   }
   async function editOrder(id) {
     try{
-      const {order:o,items,payment,paymentReady,paymentTerms}=await api('orders/'+encodeURIComponent(id));openEditor('Замовлення');
+      const {order:o,items,payment,paymentReady,paymentTerms,paymentProof}=await api('orders/'+encodeURIComponent(id));openEditor('Замовлення');
       const dl=el('dl',undefined,'detail');for(const [label,value]of [['Номер',o.id],['Дата й час (Київ)',date(o.created_at)],['Сума',money(o.amount_kop)],['Покупець',o.buyer_name],['Телефон',o.phone],['Доставка',[o.city,o.delivery_method==='nova_poshta'?'Нова пошта':o.delivery_method==='ukrposhta'?'Укрпошта':'',o.delivery_branch].filter(Boolean).join(' · ')],['Умови оплати',paymentTerms?.mode ? 'Передоплата '+money(paymentTerms.advanceKop)+', післяплата '+money(paymentTerms.codKop) : 'Не обрано або некоректні умови оплати'],['Статус оплати',paymentReady?(payment?paymentLabels[payment.state] || payment.state:'Немає умов оплати'):'Облік оплати ще не налаштовано'],['Коментар',(o.comment||'').replace(/^\[LOZA_PAYMENT:(?:full|deposit_cod)\] /,'') || '—']])dl.append(el('dt',label),el('dd',value || '—'));
       $('editorBody').append(dl,table(['Товар','Кількість','Сума'],items.map(i=>[i.product_name,i.quantity,money(i.line_total_kop)])));
       const form=el('form'),label=el('label','Статус замовлення'),select=el('select');
@@ -114,6 +114,14 @@
       $('editorBody').append(form);
       const payPanel=el('section',undefined,'payment-check');
       payPanel.append(el('h3','Контроль надходження оплати'));
+      if(paymentProof) {
+        payPanel.append(el('p','Покупець вказав суму переказу: '+money(paymentProof.reported_amount_kop)+' · завантажено: '+date(paymentProof.created_at),'hint'));
+        const proofLink=el('a','Завантажити квитанцію покупця');
+        proofLink.href='/api/admin/orders/'+encodeURIComponent(id)+'/proof';
+        proofLink.className='button';
+        payPanel.append(proofLink);
+        payPanel.append(el('p','Квитанція і сума, введена покупцем, не підтверджують зарахування. Звірте файл і фактичний рух коштів у банку, перш ніж змінити статус оплати.','hint'));
+      } else payPanel.append(el('p','Квитанції немає (старе замовлення).','hint'));
       if(!paymentReady) {
         payPanel.append(el('p','Міграція 0009_payment_tracking ще не застосована до D1 цього середовища. Замовлення залишаються доступними, але статус оплати поки не змінюється.','hint'));
       }else if(!payment || !paymentTerms?.mode) {

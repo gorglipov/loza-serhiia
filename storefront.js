@@ -127,6 +127,30 @@
   }
 
   const paymentRadio = () => document.querySelector('input[name="paymentMode"]:checked');
+  const expectedAdvanceKop = () => {
+    const mode = paymentRadio()?.value;
+    return Number.isSafeInteger(quoted?.amountKop) && mode
+      ? (mode === "full" ? quoted.amountKop : 10000) : null;
+  };
+  const parseAmountKop = value => {
+    const match = /^(\d{1,7})(?:[,.](\d{1,2}))?$/.exec(value.trim());
+    return match ? Number(match[1]) * 100 + Number((match[2] || "").padEnd(2, "0")) : null;
+  };
+  const proofFileValid = () => {
+    const file = $("#storeProofFile").files[0];
+    return Boolean(file && file.size >= 32 && file.size <= 600000 && ["image/jpeg", "image/png", "application/pdf"].includes(file.type));
+  };
+  const proofReady = () => Boolean(quoted?.manualTransferCard && expectedAdvanceKop() !== null &&
+    parseAmountKop($("#storeReportedAmount").value) === expectedAdvanceKop() && proofFileValid());
+  const readFileAsBase64 = file => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result !== "string" || !reader.result.includes(",")) reject(new Error("Не вдалося прочитати квитанцію."));
+      else resolve(reader.result.slice(reader.result.indexOf(",") + 1));
+    };
+    reader.onerror = () => reject(new Error("Не вдалося прочитати квитанцію."));
+    reader.readAsDataURL(file);
+  });
   function renderPaymentBreakdown() {
     const total = Number.isSafeInteger(quoted?.amountKop) ? quoted.amountKop : null;
     const depositOption = document.querySelector('input[name="paymentMode"][value="deposit_cod"]');
@@ -140,10 +164,35 @@
       ? "Для замовлень менше 100 грн доступна лише повна передоплата."
       : method === "deposit_cod"
         ? "100 грн — погоджена передоплата; решта — післяплата при отриманні. Доставка й комісії не включені."
-        : method === "full" ? "Суму товарів потрібно узгодити з продавцем. Оплата на сайті вимкнена."
+        : method === "full" ? "До оформлення переказуйте точну суму вартості товарів на картку."
         : "Оберіть умови оплати, щоб побачити розрахунок.";
+    const transferReady = Boolean(quoted?.manualTransferCard && method && expectedAdvanceKop() !== null);
+    $("#storePaymentProof").hidden = !transferReady;
+    $("#storeReportedAmount").disabled = !transferReady;
+    $("#storeProofFile").disabled = !transferReady;
+    $("#storeCheckoutCard").textContent = transferReady ? quoted.manualTransferCard.replace(/(.{4})/g, "$1 ").trim() : "";
+    $("#storeProofExpected").textContent = transferReady ? price(expectedAdvanceKop()) : "—";
+    if (!quoted?.manualTransferCard && quoted && !quoteLoading) {
+      $("#storePaymentInfo").textContent = "Реквізити для переказу недоступні. Замовлення зараз не оформлюється.";
+    }
+    const entered = parseAmountKop($("#storeReportedAmount").value);
+    $("#storeProofStatus").textContent = !$("#storeReportedAmount").value.trim()
+      ? "Вкажіть суму з квитанції та виберіть файл."
+      : entered !== expectedAdvanceKop() ? `Сума не збігається. Для цього способу потрібно рівно ${price(expectedAdvanceKop())}.`
+      : !proofFileValid() ? "Сума збігається. Прикріпіть JPG, PNG або PDF до 600 КБ."
+      : "Сума збігається з кошиком, файл додано. Продавець перевірить чек і зарахування.";
   }
   document.querySelectorAll('input[name="paymentMode"]').forEach(input => input.addEventListener("change", () => { renderPaymentBreakdown(); updateControls(); }));
+  for (const selector of ["#storeReportedAmount", "#storeProofFile"]) {
+    $(selector).addEventListener(selector === "#storeProofFile" ? "change" : "input", updateControls);
+  }
+  $("#storeCopyCard").addEventListener("click", async () => {
+    if (!quoted?.manualTransferCard) return;
+    try {
+      await navigator.clipboard.writeText(quoted.manualTransferCard);
+      $("#storeCopyFeedback").textContent = "Номер картки скопійовано.";
+    } catch { $("#storeCopyFeedback").textContent = "Не вдалося скопіювати автоматично. Виділіть номер картки вище."; }
+  });
 
   function updateControls() {
     const empty = !cart.length;
@@ -155,9 +204,9 @@
     $("#storeRecovery").hidden = !pending || receiptShown;
     $("#storeRecoverButton").disabled = recovering || inFlight;
     $("#storeFields").disabled = inFlight || Boolean(pendingPayload);
-    $("#storeSubmit").disabled = inFlight || recovering || !config?.checkoutAvailable || !token || (!pending && (!quoted || quoteLoading || !paymentRadio()));
     renderPaymentBreakdown();
-    $("#storeSubmit").textContent = inFlight ? "Створюємо замовлення…" : pending ? "Повторити надсилання" : "Оформити замовлення";
+    $("#storeSubmit").disabled = inFlight || recovering || !config?.checkoutAvailable || !token || (!pendingPayload && (!quoted || quoteLoading || !paymentRadio() || !proofReady()));
+    $("#storeSubmit").textContent = inFlight ? "Надсилаємо квитанцію…" : pending ? "Повторити надсилання" : "Підтвердити замовлення з квитанцією";
     $("#storeTotal").textContent = quoted ? price(quoted.amountKop) : quoteLoading ? "Розраховуємо…" : "—";
     $("#storeRefreshQuote").hidden = !cart.length || receiptShown || Boolean(quoted) || quoteLoading || Boolean(pending);
     $("#storeForm").setAttribute("aria-busy", String(inFlight));
@@ -455,24 +504,31 @@
     }
     if (!token) { feedback("Пройдіть перевірку перед надсиланням.", "error"); return; }
     if (!pending && (!quoted || quoteLoading || !cart.length)) { feedback("Дочекайтеся розрахунку кошика.", "error"); return; }
-    const input = pendingPayload || {
-      items: pending ? pending.items : cart.map(item => ({ ...item })),
-      customer: { name: $("#storeBuyer").value.trim(), phone: $("#storePhone").value.trim() },
-      delivery: { city: $("#storeCity").value.trim(), method: $("#storeDelivery").value, branch: $("#storeBranch").value.trim() },
-      comment: $("#storeComment").value.trim(),
-      payment: { mode: paymentRadio()?.value || "" },
-    };
-    pending ||= { key: makeKey(), items: input.items.map(item => ({ ...item })) };
-    pendingPayload = input;
-    savePending(); inFlight = true; feedback("Створюємо замовлення…"); updateControls(); renderCatalog(); renderCart();
+    if (!pendingPayload && !proofReady()) { feedback("Додайте квитанцію та вкажіть точну суму передоплати.", "error"); return; }
+    inFlight = true; feedback("Надсилаємо квитанцію й створюємо замовлення…"); updateControls();
     try {
+      const file = $("#storeProofFile").files[0];
+      const input = pendingPayload || {
+        items: pending ? pending.items : cart.map(item => ({ ...item })),
+        customer: { name: $("#storeBuyer").value.trim(), phone: $("#storePhone").value.trim() },
+        delivery: { city: $("#storeCity").value.trim(), method: $("#storeDelivery").value, branch: $("#storeBranch").value.trim() },
+        comment: $("#storeComment").value.trim(),
+        payment: {
+          mode: paymentRadio()?.value || "",
+          reportedAmountKop: parseAmountKop($("#storeReportedAmount").value),
+          proof: { mimeType: file?.type, dataBase64: await readFileAsBase64(file) },
+        },
+      };
+      pending ||= { key: makeKey(), items: input.items.map(item => ({ ...item })) };
+      pendingPayload = input;
+      savePending(); renderCatalog(); renderCart();
       const result = await api("/api/orders/create", { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": pending.key }, body: JSON.stringify({ ...input, turnstileToken: token }), signal: timeoutSignal(25000) });
       showReceipt(result, input.items);
     } catch (error) {
       if (error.code === "IDEMPOTENCY_CONFLICT") {
         pendingPayload = null;
         feedback("Попередній запит уже прийнято. Натисніть «Перевірити попередній запит».", "error");
-      } else if (["INVALID_DETAILS", "INVALID_ITEMS", "INVALID_BODY", "INVALID_FORMAT", "INVALID_KEY", "STOCK_UNAVAILABLE", "FORBIDDEN"].includes(error.code)) {
+      } else if (["INVALID_DETAILS", "INVALID_ITEMS", "INVALID_BODY", "INVALID_FORMAT", "INVALID_KEY", "INVALID_PAYMENT_PROOF", "BODY_TOO_LARGE", "STOCK_UNAVAILABLE", "FORBIDDEN"].includes(error.code)) {
         pending = null; pendingPayload = null; savePending();
         feedback(error.message, "error");
         if (error.code === "STOCK_UNAVAILABLE") { await loadCatalog(false); scheduleQuote(); }

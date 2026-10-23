@@ -1,5 +1,6 @@
 const encoder = new TextEncoder();
 export const MAX_QUANTITY = 5;
+export const MAX_PROOF_BYTES = 600000;
 export const DELIVERY_METHODS = [
   { id: "nova_poshta", name: "Нова пошта" },
 ];
@@ -140,6 +141,35 @@ export function paymentFromStored(comment, amountKop) {
   catch { return { mode: null, advanceKop: null, codKop: null }; }
 }
 
+// A receipt is evidence submitted by the buyer, never verification of a bank transfer.
+export function normalizePaymentProof(input, expectedAmountKop) {
+  if (!input || typeof input !== "object" || Array.isArray(input) ||
+      !Number.isSafeInteger(input.reportedAmountKop) || input.reportedAmountKop !== expectedAmountKop) {
+    throw new StoreError("INVALID_PAYMENT_PROOF", "Вкажіть точну суму переказу, яка збігається з передоплатою.");
+  }
+  const file = input.proof;
+  if (!file || typeof file !== "object" || Array.isArray(file) ||
+      !["image/jpeg", "image/png", "application/pdf"].includes(file.mimeType) ||
+      typeof file.dataBase64 !== "string" || file.dataBase64.length > Math.ceil(MAX_PROOF_BYTES * 4 / 3) + 4 ||
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(file.dataBase64)) {
+    throw new StoreError("INVALID_PAYMENT_PROOF", "Додайте чек у форматі JPG, PNG або PDF (до 600 КБ).");
+  }
+  let decoded;
+  try { decoded = atob(file.dataBase64); }
+  catch { throw new StoreError("INVALID_PAYMENT_PROOF", "Не вдалося прочитати квитанцію."); }
+  if (decoded.length < 32 || decoded.length > MAX_PROOF_BYTES) {
+    throw new StoreError("INVALID_PAYMENT_PROOF", "Розмір квитанції має бути до 600 КБ.");
+  }
+  const bytes = Uint8Array.from(decoded, char => char.charCodeAt(0));
+  const isPng = bytes.length > 8 && [137,80,78,71,13,10,26,10].every((v,i) => bytes[i] === v);
+  const isJpeg = bytes.length > 3 && bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
+  const isPdf = bytes.length > 5 && [37,80,68,70,45].every((v,i) => bytes[i] === v);
+  if (!(file.mimeType === "image/png" && isPng || file.mimeType === "image/jpeg" && isJpeg || file.mimeType === "application/pdf" && isPdf)) {
+    throw new StoreError("INVALID_PAYMENT_PROOF", "Вміст квитанції не відповідає вибраному формату.");
+  }
+  return { mimeType: file.mimeType, bytes, reportedAmountKop: input.reportedAmountKop };
+}
+
 export async function digest(value) {
   return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(value))), byte => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -216,15 +246,14 @@ export async function findReceipt(database, keyHash) {
     FROM order_checkout c JOIN orders o ON o.id = c.order_id WHERE c.request_key_hash = ?`).bind(keyHash).first();
 }
 
-// Manual card transfers happen outside LOZA. A receipt capability (Idempotency-Key)
-// is required to retrieve instructions; no card number is stored in GitHub or D1.
-export function manualTransferForReceipt(row, env) {
-  if (!row || !env || env.MANUAL_TRANSFER_ENABLED !== "true" || row.demo_only) return null;
-  const terms = paymentFromStored(row.comment, row.amount_kop);
+// Manual transfers happen outside LOZA. The card is intended for display during
+// checkout, but must be configured in Cloudflare (never stored in GitHub or D1).
+export function manualTransferCard(env) {
+  if (!env || env.MANUAL_TRANSFER_ENABLED !== "true") return null;
   const card = typeof env.MANUAL_TRANSFER_CARD === "string"
     ? env.MANUAL_TRANSFER_CARD.replace(/[\s-]/g, "")
     : "";
-  if (!/^\d{16,19}$/.test(card) || !terms.mode || !Number.isSafeInteger(terms.advanceKop) || terms.advanceKop < 1) return null;
+  if (!/^\d{16,19}$/.test(card)) return null;
   // Reject accidentally mistyped card numbers (Luhn checksum).
   let sum = 0;
   for (let i = card.length - 1, position = 0; i >= 0; i--, position++) {
@@ -233,6 +262,14 @@ export function manualTransferForReceipt(row, env) {
     sum += digit;
   }
   if (sum % 10 !== 0) return null;
+  return card;
+}
+
+export function manualTransferForReceipt(row, env) {
+  if (!row || row.demo_only) return null;
+  const terms = paymentFromStored(row.comment, row.amount_kop);
+  const card = manualTransferCard(env);
+  if (!card || !terms.mode || !Number.isSafeInteger(terms.advanceKop) || terms.advanceKop < 1) return null;
   return { card, amountKop: terms.advanceKop, reference: row.id };
 }
 

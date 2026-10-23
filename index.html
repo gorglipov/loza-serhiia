@@ -61,24 +61,35 @@ html{scroll-behavior:smooth}
         <p class="store-help" id="storeDepositReason">Передоплата потрібна, щоб зменшити кількість фейкових замовлень і витрати на доставку та повернення неотриманих відправлень. Умови повернення передоплати узгоджуються окремо відповідно до закону.</p>
         <div class="loza-payment-breakdown" aria-live="polite"><div><span>Вартість товарів</span><strong id="storePaymentTotal">—</strong></div><div><span>Передоплата (план)</span><strong id="storeAdvance">—</strong></div><div><span>Післяплата за товар</span><strong id="storeCod">—</strong></div></div>
         <p id="storePaymentInfo" class="store-help" role="status">Оберіть умови оплати, щоб побачити розрахунок.</p>
+        <section class="store-payment-proof" id="storePaymentProof" aria-label="Переказ і завантаження квитанції" hidden>
+          <h4>Оплатіть перед оформленням</h4>
+          <p class="store-help">Скопіюйте номер картки, переказуйте <strong id="storeProofExpected">—</strong> через свій банківський застосунок. Перевірте суму перед переказом.</p>
+          <div class="store-card-copy"><span id="storeCheckoutCard" aria-label="Номер картки для переказу"></span><button type="button" id="storeCopyCard" class="store-copy-button">Скопіювати</button></div>
+          <p class="store-help" id="storeCopyFeedback" role="status"></p>
+          <label for="storeReportedAmount">Сума фактичного переказу за квитанцією (грн) *<input id="storeReportedAmount" inputmode="decimal" autocomplete="off" placeholder="Наприклад, 100,00" required></label>
+          <label for="storeProofFile">Чек або квитанція * (JPG, PNG чи PDF до 600 КБ)<input id="storeProofFile" type="file" accept="image/jpeg,image/png,application/pdf" required></label>
+          <p class="store-help" id="storeProofStatus" role="status">Вкажіть точну суму переказу та додайте квитанцію.</p>
+          <p class="store-help">Перед завантаженням за можливості приховайте на чеку залишок на рахунку та зайві реквізити. Залиште суму, дату й ідентифікатор операції.</p>
+          <p class="store-help">Перевірка суми тут порівнює введені вами дані з вартістю передоплати. Факт зарахування перевіряє продавець у банку. Якщо платіж уже зроблено, не платіть удруге.</p>
+        </section>
       </fieldset>
     </fieldset>
-    <p class="store-help">Це лише вибір умов розрахунку: списання коштів на сайті не здійснюється, переказ не підтверджується автоматично. Продавець зв’яжеться з вами для узгодження законного способу оплати. Доставка та комісія післяплати не входять у суму товарів.</p>
+    <p class="store-help">Переказ виконується у вашому банку, не на сайті. Після прикріплення квитанції замовлення очікуватиме ручного підтвердження продавцем. Доставка й комісії післяплати не входять у суму товарів.</p>
     <div class="store-turnstile" id="storeTurnstile"></div>
     <p class="store-consent">Контактні дані та адресу доставки використовуємо для опрацювання вашого замовлення.</p>
     <button class="primary" id="storeSubmit" type="submit" disabled>Оформити замовлення</button>
   </form>
   <p class="store-feedback" id="storeFeedback" role="status" aria-live="polite" aria-atomic="true"></p>
   <section class="store-receipt" id="storeReceipt" aria-labelledby="storeReceiptTitle" hidden>
-    <h3 id="storeReceiptTitle" tabindex="-1">Замовлення створено</h3>
+    <h3 id="storeReceiptTitle" tabindex="-1">Замовлення та квитанцію отримано</h3>
     <dl><div><dt>Номер замовлення</dt><dd id="storeOrderNumber" class="store-order-id"></dd></div><div><dt>Сума за товарами</dt><dd id="storeOrderAmount"></dd></div><div><dt>Статус</dt><dd id="storeOrderStatus">Очікує підтвердження</dd></div></dl>
     <p id="storeReceiptPayment" class="store-help">Умови оплати очікують узгодження з продавцем.</p>
     <section class="store-manual-transfer" id="storeManualTransfer" aria-label="Реквізити для ручної передоплати" hidden>
       <h4>Передоплата переказом на картку</h4>
       <dl><div><dt>Картка отримувача</dt><dd id="storeTransferCard"></dd></div><div><dt>Сума передоплати</dt><dd id="storeTransferAmount"></dd></div><div><dt>Номер замовлення</dt><dd id="storeTransferReference"></dd></div></dl>
-      <p class="store-help">Переказ зробіть у своєму банківському застосунку. Якщо є поле призначення платежу, зазначте номер замовлення. Після переказу повідомте продавцю цей номер. Він підтвердить оплату лише після перевірки надходження у своєму банку. Не переказуйте повторно, якщо вже сплатили.</p>
+      <p class="store-help">Ви завантажили квитанцію до замовлення. Продавець перевірить зарахування на картку у своєму банку. Не переказуйте кошти вдруге.</p>
     </section>
-    <p class="store-help">Замовлення створено, але переказ не здійснювався через сайт і надходження коштів не перевірено.</p>
+    <p class="store-help">Квитанцію прийнято на перевірку. Надходження грошей іще не підтверджено продавцем — не виконуйте повторний переказ.</p>
     <button class="primary" type="button" id="storeContinue">Продовжити покупки</button>
   </section>
 </div></aside></div><div class="toast" id="toast"><span class="toast-check">✓</span><div class="toast-copy"><strong id="toastTitle">Додано до кошика</strong><span id="toastDetail"></span></div><button type="button" id="toastCart">Перейти до кошика <span>→</span></button><button class="toast-close" id="toastClose" type="button" aria-label="Закрити">×</button></div></body></html>

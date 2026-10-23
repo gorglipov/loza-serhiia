@@ -44,6 +44,13 @@ button:disabled{cursor:not-allowed;opacity:.6}
 .store-manual-transfer{display:grid;gap:12px;padding:16px;border:1px solid #c4d5b6;border-radius:12px;background:#f2f6eb}
 .store-manual-transfer h4{margin:0;color:var(--green);font-size:16px}
 .store-manual-transfer dd{overflow-wrap:anywhere}
+.store-payment-proof{display:grid;gap:11px;padding:14px;background:#edf3e8;border:1px solid #bfcfb6;border-radius:12px}
+.store-payment-proof h4{margin:0;color:var(--green);font-size:16px}
+.store-card-copy{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;padding:12px;border-radius:9px;background:white;border:1px solid #cdd9c6}
+.store-card-copy span{font:700 17px/1.5 ui-monospace,monospace;letter-spacing:.5px;overflow-wrap:anywhere}
+.store-form .store-copy-button{min-height:40px;padding:9px 13px;background:#30583c;color:white;border:0;border-radius:8px;font-weight:700;cursor:pointer}
+.store-payment-proof input[type=file]{height:auto;min-height:54px;padding:11px;background:white}
+.store-payment-proof .store-help strong{color:var(--green)}
 .store-receipt dt{font-size:12px;color:var(--muted)}.store-receipt dd{margin:3px 0 0;font-weight:700;overflow-wrap:anywhere}.store-receipt .store-order-id{font:13px/1.6 ui-monospace,monospace}
 .store-form [hidden],.panel [hidden],[hidden].store-receipt,[hidden].store-recovery{display:none!important}
 .store-form .store-consent{font-weight:400;font-size:12px;color:var(--muted)}

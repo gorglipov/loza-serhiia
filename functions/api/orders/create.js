@@ -1,4 +1,4 @@
-import { body, configured, db, digest, endpoint, findReceipt, normalizeOrder, paymentBreakdown, paymentMarker, quote, rateLimit, receipt, requestKey, requireSchema, StoreError, verifyTurnstile } from "../../../server/checkout.js";
+import { body, configured, db, digest, endpoint, findReceipt, manualTransferCard, normalizeOrder, normalizePaymentProof, paymentBreakdown, paymentMarker, quote, rateLimit, receipt, requestKey, requireSchema, StoreError, verifyTurnstile } from "../../../server/checkout.js";
 import { queueOrder, scheduleNotifications } from '../../../server/telegram.js';
 
 export const onRequest = context => endpoint(context, "POST", async context => {
@@ -6,10 +6,17 @@ export const onRequest = context => endpoint(context, "POST", async context => {
   await requireSchema(database);
   await rateLimit(context, database, "create", 8);
   if (!configured(context.env)) throw new StoreError("CHECKOUT_UNAVAILABLE", "Оформлення тимчасово недоступне. Спробуйте пізніше.", 503);
-  const input = await body(context.request);
+  if (!manualTransferCard(context.env)) throw new StoreError("CHECKOUT_UNAVAILABLE", "Реквізити оплати тимчасово недоступні.", 503);
+  if (!await database.prepare("SELECT version FROM loza_store_migrations WHERE version='0011_payment_proofs'").first()) {
+    throw new StoreError("CHECKOUT_UNAVAILABLE", "Завантаження квитанцій ще не налаштовано.", 503);
+  }
+  const input = await body(context.request, 850000);
   const order = normalizeOrder(input);
   const keyHash = await requestKey(context.request);
-  const payloadHash = await digest(JSON.stringify(order));
+  // The same idempotency key must always be paired with exactly the same order and proof.
+  const proofFingerprint = typeof input.payment?.proof?.dataBase64 === 'string'
+    ? await digest(input.payment.proof.dataBase64) : '';
+  const payloadHash = await digest(JSON.stringify(order) + ':' + input.payment?.reportedAmountKop + ':' + input.payment?.proof?.mimeType + ':' + proofFingerprint);
   const existing = await findReceipt(database, keyHash);
   if (existing) {
     if (existing.payload_hash !== payloadHash) throw new StoreError("IDEMPOTENCY_CONFLICT", "Попередній запит уже прийнято з іншими даними. Перевірте його підтвердження.", 409);
@@ -20,7 +27,10 @@ export const onRequest = context => endpoint(context, "POST", async context => {
   await verifyTurnstile(context, input.turnstileToken);
   const estimate = await quote(database, order.items);
   // Recompute the payable amounts from the trusted D1 quote, never from browser totals.
-  paymentBreakdown(estimate.amountKop, order.payment.mode);
+  const terms = paymentBreakdown(estimate.amountKop, order.payment.mode);
+  const proof = normalizePaymentProof(input.payment, terms.advanceKop);
+  const hashBytes = new Uint8Array(await crypto.subtle.digest('SHA-256', proof.bytes));
+  const fileHash = Array.from(hashBytes, byte => byte.toString(16).padStart(2, '0')).join('');
   // Preserve the payment preference with the order; this is not proof of money received.
   const storedComment = paymentMarker(order.payment.mode) + order.comment;
   const items = JSON.stringify(order.items);
@@ -38,6 +48,8 @@ export const onRequest = context => endpoint(context, "POST", async context => {
           id, keyHash, payloadHash, order.customer.name, order.customer.phone,
           order.delivery.city, order.delivery.method, order.delivery.branch, storedComment, items, estimate.demoOnly ? 1 : 0
         ),
+      database.prepare(`INSERT INTO order_payment_proofs (order_id, reported_amount_kop, mime_type, file_sha256, file_content)
+        VALUES (?, ?, ?, ?, ?)`).bind(id, proof.reportedAmountKop, proof.mimeType, fileHash, proof.bytes),
       queueOrder(database,id),
     ]);
   } catch (error) {
