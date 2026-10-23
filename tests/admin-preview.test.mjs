@@ -704,11 +704,11 @@ test('catalog portal navigates, cleans up, supports Escape and respects reduced 
  const {chromium}=await import(pathToFileURL(process.env.LOZA_PLAYWRIGHT_MODULE).href),browser=await chromium.launch({channel:'msedge',headless:true});
  try{for(const width of [390,1440]){
   const page=await browser.newPage({viewport:{width,height:900},reducedMotion:'no-preference'}),errors=[];page.on('pageerror',e=>errors.push(e.message));await page.goto((await mf.ready).origin+'/');await page.waitForFunction(()=>window.gsap);
-  await page.locator('.hero-cta').dispatchEvent('click');await page.locator('.catalog-portal').waitFor();
+  await Promise.all([page.locator('.catalog-portal').waitFor(),page.locator('.hero-cta').click()]);
   await page.waitForTimeout(420);await page.screenshot({path:new URL('.wrangler/portal-'+width+'.png',root).pathname.slice(process.platform==='win32'?1:0)});
   await page.locator('.catalog-portal').waitFor({state:'detached'});assert.ok(page.url().endsWith('#catalog'));assert.ok(await page.evaluate(()=>scrollY>0));assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
   await page.screenshot({path:new URL('.wrangler/catalog-background-'+width+'.png',root).pathname.slice(process.platform==='win32'?1:0)});
-  await page.evaluate(()=>scrollTo({top:0,behavior:'instant'}));await page.locator('.hero-cta').dispatchEvent('click');await page.locator('.catalog-portal').waitFor();await page.keyboard.press('Escape');await page.locator('.catalog-portal').waitFor({state:'detached'});assert.deepEqual(errors,[]);await page.close();
+  await page.evaluate(()=>scrollTo({top:0,behavior:'instant'}));await Promise.all([page.locator('.catalog-portal').waitFor(),page.locator('.hero-cta').click()]);await page.keyboard.press('Escape');await page.locator('.catalog-portal').waitFor({state:'detached'});assert.deepEqual(errors,[]);await page.close();
  }
  const page=await browser.newPage({reducedMotion:'reduce'});await page.goto((await mf.ready).origin+'/');await page.locator('.hero-cta').click();assert.equal(await page.locator('.catalog-portal').count(),0);assert.ok(page.url().endsWith('#catalog'));await page.close();
  }finally{await browser.close();}
